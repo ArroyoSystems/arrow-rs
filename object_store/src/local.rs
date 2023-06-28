@@ -19,7 +19,7 @@
 use crate::{
     maybe_spawn_blocking,
     path::{absolute_path_to_url, Path},
-    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result,
+    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result, DirectMultiPartUpload,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -283,6 +283,14 @@ impl ObjectStore for LocalFileSystem {
         })
         .await
     }
+
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+        todo!()
+    }
+    
 
     async fn put_multipart(
         &self,

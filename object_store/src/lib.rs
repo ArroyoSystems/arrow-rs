@@ -266,7 +266,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
-use std::fmt::{Debug, Formatter};
+use std::{fmt::{Debug, Formatter}, io, sync::Arc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -307,6 +307,12 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         &self,
         location: &Path,
     ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)>;
+
+
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)>;
 
     /// Cleanup an aborted upload.
     ///
@@ -524,6 +530,30 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         self.copy_if_not_exists(from, to).await?;
         self.delete(from).await
     }
+
+}
+
+
+#[derive(Debug, Clone)]
+pub struct UploadPart {
+    pub content_id: String,
+}
+
+/// A trait that can be implemented by cloud-based object stores
+/// that allows direct control over which parts are uploaded and when.
+#[async_trait]
+pub trait DirectMultiPartUpload: 'static + Send + Sync {
+    /// Upload a single part
+    async fn put_multipart_part(
+        &self,
+        buf: Vec<u8>,
+        part_idx: usize,
+    ) -> Result<UploadPart, io::Error>;
+
+    /// Complete the upload with the provided parts
+    ///
+    /// `completed_parts` is in order of part number
+    async fn complete(&self, completed_parts: Vec<UploadPart>) -> Result<(), io::Error>;
 }
 
 #[async_trait]
@@ -545,6 +575,13 @@ impl ObjectStore for Box<dyn ObjectStore> {
         multipart_id: &MultipartId,
     ) -> Result<()> {
         self.as_ref().abort_multipart(location, multipart_id).await
+    }
+    
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+        self.as_ref().start_multipart(location).await
     }
 
     async fn append(

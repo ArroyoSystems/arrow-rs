@@ -20,36 +20,13 @@ use futures::{stream::FuturesUnordered, Future, StreamExt};
 use std::{io, pin::Pin, sync::Arc, task::Poll};
 use tokio::io::AsyncWrite;
 
-use crate::Result;
+use crate::{Result, DirectMultiPartUpload, UploadPart};
 
 type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Send>>;
 
-/// A trait that can be implemented by cloud-based object stores
-/// and used in combination with [`CloudMultiPartUpload`] to provide
-/// multipart upload support
-#[async_trait]
-pub(crate) trait CloudMultiPartUploadImpl: 'static {
-    /// Upload a single part
-    async fn put_multipart_part(
-        &self,
-        buf: Vec<u8>,
-        part_idx: usize,
-    ) -> Result<UploadPart, io::Error>;
-
-    /// Complete the upload with the provided parts
-    ///
-    /// `completed_parts` is in order of part number
-    async fn complete(&self, completed_parts: Vec<UploadPart>) -> Result<(), io::Error>;
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct UploadPart {
-    pub content_id: String,
-}
-
 pub(crate) struct CloudMultiPartUpload<T>
 where
-    T: CloudMultiPartUploadImpl,
+    T: DirectMultiPartUpload,
 {
     inner: Arc<T>,
     /// A list of completed parts, in sequential order.
@@ -73,7 +50,7 @@ where
 
 impl<T> CloudMultiPartUpload<T>
 where
-    T: CloudMultiPartUploadImpl,
+    T: DirectMultiPartUpload,
 {
     pub fn new(inner: T, max_concurrency: usize) -> Self {
         Self {
@@ -123,7 +100,7 @@ where
 
 impl<T> CloudMultiPartUpload<T>
 where
-    T: CloudMultiPartUploadImpl + Send + Sync,
+    T: DirectMultiPartUpload + Send + Sync,
 {
     // The `poll_flush` function will only flush the in-progress tasks.
     // The `final_flush` method called during `poll_shutdown` will flush
@@ -160,7 +137,7 @@ where
 
 impl<T> AsyncWrite for CloudMultiPartUpload<T>
 where
-    T: CloudMultiPartUploadImpl + Send + Sync,
+    T: DirectMultiPartUpload + Send + Sync,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,

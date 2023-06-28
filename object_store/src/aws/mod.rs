@@ -56,10 +56,10 @@ use crate::client::{
     TokenCredentialProvider,
 };
 use crate::config::ConfigValue;
-use crate::multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart};
+use crate::multipart::{CloudMultiPartUpload};
 use crate::{
     ClientOptions, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta,
-    ObjectStore, Path, Result, RetryConfig,
+    ObjectStore, Path, Result, RetryConfig, DirectMultiPartUpload, UploadPart,
 };
 
 mod checksum;
@@ -230,6 +230,20 @@ impl ObjectStore for AmazonS3 {
         Ok((id, Box::new(CloudMultiPartUpload::new(upload, 8))))
     }
 
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+        let id = self.client.create_multipart(location).await?;
+
+        let upload = S3MultiPartUpload {
+            location: location.clone(),
+            upload_id: id.clone(),
+            client: Arc::clone(&self.client),
+        };
+        Ok((id, Arc::new(upload)))
+    }
+
     async fn abort_multipart(
         &self,
         location: &Path,
@@ -308,7 +322,7 @@ struct S3MultiPartUpload {
 }
 
 #[async_trait]
-impl CloudMultiPartUploadImpl for S3MultiPartUpload {
+impl DirectMultiPartUpload for S3MultiPartUpload {
     async fn put_multipart_part(
         &self,
         buf: Vec<u8>,

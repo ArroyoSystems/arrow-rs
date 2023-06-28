@@ -17,7 +17,7 @@
 
 //! An in-memory object store implementation
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
-use crate::{GetOptions, MultipartId};
+use crate::{GetOptions, MultipartId, DirectMultiPartUpload};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -106,6 +106,13 @@ impl ObjectStore for InMemory {
                 storage: Arc::clone(&self.storage),
             }),
         ))
+    }
+
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+        todo!();
     }
 
     async fn abort_multipart(

@@ -19,7 +19,7 @@
 
 use crate::{
     BoxStream, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore,
-    Path, Result, StreamExt, DirectMultiPartUpload,
+    Path, Result, StreamExt, UploadPart,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -85,12 +85,38 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         let (id, write) = self.inner.put_multipart(location).await?;
         Ok((id, Box::new(PermitWrapper::new(write, permit))))
     }
+
     async fn start_multipart(
         &self,
         location: &Path,
-    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
-        let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
+    ) -> Result<MultipartId> {
+        let _permit = self.semaphore.acquire().await.unwrap();
         self.inner.start_multipart(location).await
+    }
+
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_number: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart> {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        self.inner
+            .add_multipart(location, upload_id, part_number, bytes)
+            .await
+    }
+
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        self.inner
+            .close_multipart(location, upload_id, parts)
+            .await
     }
 
     async fn abort_multipart(

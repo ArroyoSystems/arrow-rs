@@ -24,7 +24,7 @@ use tokio::io::AsyncWrite;
 
 use crate::path::Path;
 use crate::{
-    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result, DirectMultiPartUpload,
+    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result, DirectMultiPartUpload, UploadPart,
 };
 
 #[doc(hidden)]
@@ -93,9 +93,39 @@ impl<T: ObjectStore> ObjectStore for PrefixStore<T> {
         self.inner.put_multipart(&full_path).await
     }
 
-    async fn start_multipart(&self, location: &Path) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
-        let full_path = self.full_path(location);
-        self.inner.start_multipart(&full_path).await
+    async fn start_multipart(
+        &self,
+        location: &Path,
+    ) -> Result<MultipartId> {
+        self.inner.start_multipart(&self.full_path(location)).await
+    }
+
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_number: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart> {
+        self.inner
+            .add_multipart(
+                &self.full_path(location),
+                upload_id,
+                part_number,
+                bytes,
+            )
+            .await
+    }
+
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        self.inner
+            .close_multipart(&self.full_path(location), upload_id, parts)
+            .await
     }
 
     async fn abort_multipart(

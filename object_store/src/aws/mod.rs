@@ -233,15 +233,56 @@ impl ObjectStore for AmazonS3 {
     async fn start_multipart(
         &self,
         location: &Path,
-    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+    ) -> Result<MultipartId> {
         let id = self.client.create_multipart(location).await?;
+        Ok(id)
+    }
 
-        let upload = S3MultiPartUpload {
-            location: location.clone(),
-            upload_id: id.clone(),
-            client: Arc::clone(&self.client),
-        };
-        Ok((id, Arc::new(upload)))
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_idx: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart> {
+        use reqwest::header::ETAG;
+        let part = (part_idx + 1).to_string();
+
+        let response = self
+            .client
+            .put_request(
+                location,
+                Some(bytes),
+                &[("partNumber", &part), ("uploadId", upload_id)],
+            )
+            .await?;
+
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .context(MissingEtagSnafu)
+            .map_err(crate::Error::from)?;
+
+        let etag = etag
+            .to_str()
+            .context(BadHeaderSnafu)
+            .map_err(crate::Error::from)?;
+
+        Ok(UploadPart {
+            content_id: etag.to_string(),
+        })
+    }
+
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        self.client
+            .complete_multipart(location, upload_id, parts)
+            .await?;
+        Ok(())
     }
 
     async fn abort_multipart(

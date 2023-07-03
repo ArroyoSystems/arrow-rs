@@ -266,7 +266,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
-use std::{fmt::{Debug, Formatter}, io, sync::Arc};
+use std::{fmt::{Debug, Formatter}, io};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -308,11 +308,32 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         location: &Path,
     ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)>;
 
-
+    /// Initializes a multi-part upload that allows writing data in chunks.
+    /// Caller is responsible for managing the upload parts and completing
+    /// the upload.
     async fn start_multipart(
         &self,
         location: &Path,
-    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)>;
+    ) -> Result<MultipartId>;
+
+    /// Upload a part of a multi-part upload. 
+    /// Caller is responsible for the validity of the upload_id and part_number.
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_number: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart>;
+
+    /// Complete a multi-part upload.
+    /// Caller is responsible for the validity of the upload_id and parts.
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()>;
 
     /// Cleanup an aborted upload.
     ///
@@ -580,8 +601,31 @@ impl ObjectStore for Box<dyn ObjectStore> {
     async fn start_multipart(
         &self,
         location: &Path,
-    ) -> Result<(MultipartId, Arc<dyn DirectMultiPartUpload>)> {
+    ) -> Result<MultipartId> {
         self.as_ref().start_multipart(location).await
+    }
+
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_number: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart> {
+        self.as_ref()
+            .add_multipart(location, upload_id, part_number, bytes)
+            .await
+    }
+
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        self.as_ref()
+            .close_multipart(location, upload_id, parts)
+            .await
     }
 
     async fn append(

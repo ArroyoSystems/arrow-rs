@@ -244,6 +244,9 @@ impl<W: Write> ArrowWriter<W> {
         self.flush()?;
         self.writer.close()
     }
+    pub fn get_trailing_bytes(&mut self, target: W) -> Result<W> {
+        self.writer.write_trailing_bytes(target)
+    }
 }
 
 fn write_leaves<W: Write>(

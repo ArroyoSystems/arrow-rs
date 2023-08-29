@@ -25,7 +25,8 @@ use crate::client::retry::RetryExt;
 use crate::client::GetOptionsExt;
 use crate::path::DELIMITER;
 use crate::{
-    ClientOptions, GetOptions, ListResult, MultipartId, Path, Result, RetryConfig, UploadPart,
+    ClientOptions, GetOptions, ListResult, MultipartId, Path, Result, RetryConfig,
+    UploadPart,
 };
 use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;

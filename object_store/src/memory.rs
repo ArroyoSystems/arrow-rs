@@ -17,7 +17,7 @@
 
 //! An in-memory object store implementation
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
-use crate::{GetOptions, MultipartId, DirectMultiPartUpload, UploadPart};
+use crate::{DirectMultiPartUpload, GetOptions, MultipartId, UploadPart};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -108,10 +108,7 @@ impl ObjectStore for InMemory {
         ))
     }
 
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         Err(super::Error::NotImplemented)
     }
 

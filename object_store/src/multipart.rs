@@ -20,7 +20,7 @@ use futures::{stream::FuturesUnordered, Future, StreamExt};
 use std::{io, pin::Pin, sync::Arc, task::Poll};
 use tokio::io::AsyncWrite;
 
-use crate::{Result, DirectMultiPartUpload, UploadPart};
+use crate::{DirectMultiPartUpload, Result, UploadPart};
 
 type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Send>>;
 

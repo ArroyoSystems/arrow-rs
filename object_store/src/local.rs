@@ -19,7 +19,8 @@
 use crate::{
     maybe_spawn_blocking,
     path::{absolute_path_to_url, Path},
-    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result, UploadPart,
+    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result,
+    UploadPart,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -284,10 +285,7 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         todo!()
     }
 
@@ -889,7 +887,11 @@ impl AsyncWrite for LocalUpload {
     }
 }
 
-pub(crate) fn read_range(file: &mut File, path: &PathBuf, range: Range<usize>) -> Result<Bytes> {
+pub(crate) fn read_range(
+    file: &mut File,
+    path: &PathBuf,
+    range: Range<usize>,
+) -> Result<Bytes> {
     let to_read = range.end - range.start;
     file.seek(SeekFrom::Start(range.start as u64))
         .context(SeekSnafu { path })?;

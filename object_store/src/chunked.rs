@@ -72,10 +72,7 @@ impl ObjectStore for ChunkedStore {
     ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         self.inner.put_multipart(location).await
     }
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         self.inner.start_multipart(location).await
     }
 
@@ -97,9 +94,7 @@ impl ObjectStore for ChunkedStore {
         upload_id: &MultipartId,
         parts: Vec<UploadPart>,
     ) -> Result<()> {
-        self.inner
-            .close_multipart(location, upload_id, parts)
-            .await
+        self.inner.close_multipart(location, upload_id, parts).await
     }
 
     async fn abort_multipart(

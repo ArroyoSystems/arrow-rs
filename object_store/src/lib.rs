@@ -266,10 +266,13 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
-use std::{fmt::{Debug, Formatter}, io};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
+use std::{
+    fmt::{Debug, Formatter},
+    io,
+};
 use tokio::io::AsyncWrite;
 
 #[cfg(any(feature = "azure", feature = "aws", feature = "gcp", feature = "http"))]
@@ -311,12 +314,11 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Initializes a multi-part upload that allows writing data in chunks.
     /// Caller is responsible for managing the upload parts and completing
     /// the upload.
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId>;
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
+        Err(Error::NotImplemented)
+    }
 
-    /// Upload a part of a multi-part upload. 
+    /// Upload a part of a multi-part upload.
     /// Caller is responsible for the validity of the upload_id and part_number.
     async fn add_multipart(
         &self,
@@ -324,7 +326,9 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         upload_id: &MultipartId,
         part_number: usize,
         bytes: Bytes,
-    ) -> Result<UploadPart>;
+    ) -> Result<UploadPart> {
+        Err(Error::NotImplemented)
+    }
 
     /// Complete a multi-part upload.
     /// Caller is responsible for the validity of the upload_id and parts.
@@ -333,7 +337,9 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         location: &Path,
         upload_id: &MultipartId,
         parts: Vec<UploadPart>,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        Err(Error::NotImplemented)
+    }
 
     /// Cleanup an aborted upload.
     ///
@@ -551,9 +557,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         self.copy_if_not_exists(from, to).await?;
         self.delete(from).await
     }
-
 }
-
 
 #[derive(Debug, Clone)]
 pub struct UploadPart {
@@ -597,11 +601,8 @@ impl ObjectStore for Box<dyn ObjectStore> {
     ) -> Result<()> {
         self.as_ref().abort_multipart(location, multipart_id).await
     }
-    
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         self.as_ref().start_multipart(location).await
     }
 

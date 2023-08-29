@@ -21,7 +21,7 @@ use std::ops::Range;
 use std::{convert::TryInto, sync::Arc};
 
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
-use crate::{GetOptions, MultipartId, DirectMultiPartUpload, UploadPart};
+use crate::{DirectMultiPartUpload, GetOptions, MultipartId, UploadPart};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::BoxStream, FutureExt, StreamExt};
@@ -158,11 +158,7 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         Err(super::Error::NotImplemented)
     }
 
-
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         Err(super::Error::NotImplemented)
     }
 

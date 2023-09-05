@@ -28,10 +28,10 @@
 //! after 7 days.
 use self::client::{BlockId, BlockList};
 use crate::{
-    multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart},
+    multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl},
     path::Path,
     ClientOptions, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta,
-    ObjectStore, Result, RetryConfig,
+    ObjectStore, Result, RetryConfig, UploadPart,
 };
 use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;

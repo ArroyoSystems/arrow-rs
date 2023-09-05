@@ -30,7 +30,7 @@ use tokio::io::AsyncWrite;
 
 use crate::path::Path;
 use crate::util::maybe_spawn_blocking;
-use crate::{GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, UploadPart};
+use crate::{GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore};
 use crate::{MultipartId, Result};
 
 /// Wraps a [`ObjectStore`] and makes its get response return chunks
@@ -71,35 +71,6 @@ impl ObjectStore for ChunkedStore {
         location: &Path,
     ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         self.inner.put_multipart(location).await
-    }
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
-        self.inner.start_multipart(location).await
-    }
-
-    async fn add_multipart(
-        &self,
-        location: &Path,
-        upload_id: &MultipartId,
-        part_number: usize,
-        bytes: Bytes,
-    ) -> Result<UploadPart> {
-        self.inner
-            .add_multipart(location, upload_id, part_number, bytes)
-            .await
-    }
-
-    async fn close_multipart(
-        &self,
-        location: &Path,
-        upload_id: &MultipartId,
-        parts: Vec<UploadPart>,
-    ) -> Result<()> {
-        self.inner
-            .close_multipart(location, upload_id, parts)
-            .await
     }
 
     async fn abort_multipart(

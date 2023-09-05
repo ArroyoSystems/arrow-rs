@@ -86,10 +86,7 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         Ok((id, Box::new(PermitWrapper::new(write, permit))))
     }
 
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         let _permit = self.semaphore.acquire().await.unwrap();
         self.inner.start_multipart(location).await
     }
@@ -114,9 +111,7 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         parts: Vec<UploadPart>,
     ) -> Result<()> {
         let _permit = self.semaphore.acquire().await.unwrap();
-        self.inner
-            .close_multipart(location, upload_id, parts)
-            .await
+        self.inner.close_multipart(location, upload_id, parts).await
     }
 
     async fn abort_multipart(

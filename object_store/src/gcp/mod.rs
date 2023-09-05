@@ -51,8 +51,9 @@ use crate::client::{
     ClientConfigKey, CredentialProvider, GetOptionsExt, StaticCredentialProvider,
     TokenCredentialProvider,
 };
+use crate::UploadPart;
 use crate::{
-    multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart},
+    multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl},
     path::{Path, DELIMITER},
     ClientOptions, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta,
     ObjectStore, Result, RetryConfig,
@@ -589,6 +590,59 @@ impl ObjectStore for GoogleCloudStorage {
         };
 
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
+    }
+
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
+        self.client.multipart_initiate(location).await
+    }
+
+    /// Upload a part of a multi-part upload.
+    /// Caller is responsible for the validity of the upload_id and part_number.
+    async fn add_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        part_number: usize,
+        bytes: Bytes,
+    ) -> Result<UploadPart> {
+        let encoded_path =
+            percent_encode(location.to_string().as_bytes(), NON_ALPHANUMERIC).to_string();
+        let inner = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            encoded_path,
+            multipart_id: upload_id.clone(),
+        };
+        inner
+            .put_multipart_part(bytes.to_vec(), part_number)
+            .await
+            .map_err(|e| crate::Error::Generic {
+                store: "gcp",
+                source: Box::new(e),
+            })
+    }
+
+    /// Complete a multi-part upload.
+    /// Caller is responsible for the validity of the upload_id and parts.
+    async fn close_multipart(
+        &self,
+        location: &Path,
+        upload_id: &MultipartId,
+        parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        let encoded_path =
+            percent_encode(location.to_string().as_bytes(), NON_ALPHANUMERIC).to_string();
+        let inner = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            encoded_path,
+            multipart_id: upload_id.clone(),
+        };
+        inner
+            .complete(parts)
+            .await
+            .map_err(|e| crate::Error::Generic {
+                store: "gcp",
+                source: Box::new(e),
+            })
     }
 
     async fn abort_multipart(

@@ -266,7 +266,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
-use std::{fmt::{Debug, Formatter}, io};
+use std::fmt::{Debug, Formatter};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -311,29 +311,32 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Initializes a multi-part upload that allows writing data in chunks.
     /// Caller is responsible for managing the upload parts and completing
     /// the upload.
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId>;
+    async fn start_multipart(&self, _location: &Path) -> Result<MultipartId> {
+        Err(Error::NotImplemented)
+    }
 
-    /// Upload a part of a multi-part upload. 
+    /// Upload a part of a multi-part upload.
     /// Caller is responsible for the validity of the upload_id and part_number.
     async fn add_multipart(
         &self,
-        location: &Path,
-        upload_id: &MultipartId,
-        part_number: usize,
-        bytes: Bytes,
-    ) -> Result<UploadPart>;
+        _location: &Path,
+        _upload_id: &MultipartId,
+        _part_number: usize,
+        _bytes: Bytes,
+    ) -> Result<UploadPart> {
+        Err(Error::NotImplemented)
+    }
 
     /// Complete a multi-part upload.
     /// Caller is responsible for the validity of the upload_id and parts.
     async fn close_multipart(
         &self,
-        location: &Path,
-        upload_id: &MultipartId,
-        parts: Vec<UploadPart>,
-    ) -> Result<()>;
+        _location: &Path,
+        _upload_id: &MultipartId,
+        _parts: Vec<UploadPart>,
+    ) -> Result<()> {
+        Err(Error::NotImplemented)
+    }
 
     /// Cleanup an aborted upload.
     ///
@@ -551,30 +554,12 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         self.copy_if_not_exists(from, to).await?;
         self.delete(from).await
     }
-
 }
-
-
+/// Contains the ID for one part of a multi-part upload.
 #[derive(Debug, Clone)]
 pub struct UploadPart {
+    /// The string ID for the upload
     pub content_id: String,
-}
-
-/// A trait that can be implemented by cloud-based object stores
-/// that allows direct control over which parts are uploaded and when.
-#[async_trait]
-pub trait DirectMultiPartUpload: 'static + Send + Sync {
-    /// Upload a single part
-    async fn put_multipart_part(
-        &self,
-        buf: Vec<u8>,
-        part_idx: usize,
-    ) -> Result<UploadPart, io::Error>;
-
-    /// Complete the upload with the provided parts
-    ///
-    /// `completed_parts` is in order of part number
-    async fn complete(&self, completed_parts: Vec<UploadPart>) -> Result<(), io::Error>;
 }
 
 #[async_trait]
@@ -597,11 +582,8 @@ impl ObjectStore for Box<dyn ObjectStore> {
     ) -> Result<()> {
         self.as_ref().abort_multipart(location, multipart_id).await
     }
-    
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         self.as_ref().start_multipart(location).await
     }
 

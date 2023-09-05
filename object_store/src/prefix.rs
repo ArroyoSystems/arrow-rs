@@ -19,12 +19,12 @@
 use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use std::ops::Range;
-use std::sync::Arc;
 use tokio::io::AsyncWrite;
 
 use crate::path::Path;
 use crate::{
-    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result, DirectMultiPartUpload, UploadPart,
+    GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result,
+    UploadPart,
 };
 
 #[doc(hidden)]
@@ -93,10 +93,7 @@ impl<T: ObjectStore> ObjectStore for PrefixStore<T> {
         self.inner.put_multipart(&full_path).await
     }
 
-    async fn start_multipart(
-        &self,
-        location: &Path,
-    ) -> Result<MultipartId> {
+    async fn start_multipart(&self, location: &Path) -> Result<MultipartId> {
         self.inner.start_multipart(&self.full_path(location)).await
     }
 
@@ -108,12 +105,7 @@ impl<T: ObjectStore> ObjectStore for PrefixStore<T> {
         bytes: Bytes,
     ) -> Result<UploadPart> {
         self.inner
-            .add_multipart(
-                &self.full_path(location),
-                upload_id,
-                part_number,
-                bytes,
-            )
+            .add_multipart(&self.full_path(location), upload_id, part_number, bytes)
             .await
     }
 

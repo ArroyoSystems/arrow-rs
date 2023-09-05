@@ -612,12 +612,13 @@ impl ObjectStore for GoogleCloudStorage {
             encoded_path,
             multipart_id: upload_id.clone(),
         };
-        // TODO: figure out the right way to handle error types.
-        // The multipart upload returns an IO error, but this wants a crate-specific error.
-        Ok(inner
+        inner
             .put_multipart_part(bytes.to_vec(), part_number)
             .await
-            .unwrap())
+            .map_err(|e| crate::Error::Generic {
+                store: "gcp",
+                source: Box::new(e),
+            })
     }
 
     /// Complete a multi-part upload.
@@ -635,7 +636,13 @@ impl ObjectStore for GoogleCloudStorage {
             encoded_path,
             multipart_id: upload_id.clone(),
         };
-        Ok(inner.complete(parts).await.unwrap())
+        inner
+            .complete(parts)
+            .await
+            .map_err(|e| crate::Error::Generic {
+                store: "gcp",
+                source: Box::new(e),
+            })
     }
 
     async fn abort_multipart(

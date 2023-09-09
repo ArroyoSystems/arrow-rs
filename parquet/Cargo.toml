@@ -35,14 +35,14 @@ ahash = { version = "0.8", default-features = false, features = ["compile-time-r
 ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 
 [dependencies]
-arrow-array = { workspace = true, optional = true }
-arrow-buffer = { workspace = true, optional = true }
-arrow-cast = { workspace = true, optional = true }
-arrow-csv = { workspace = true, optional = true }
-arrow-data = { workspace = true, optional = true }
-arrow-schema = { workspace = true, optional = true }
-arrow-select = { workspace = true, optional = true }
-arrow-ipc = { workspace = true, optional = true }
+arrow-array = { version = "43.0.0", optional = true }
+arrow-buffer = { version = "43.0.0", optional = true }
+arrow-cast = { version = "43.0.0", optional = true }
+arrow-csv = { version = "43.0.0", optional = true }
+arrow-data = { version = "43.0.0", optional = true }
+arrow-schema = { version = "43.0.0", optional = true }
+arrow-select = { version = "43.0.0", optional = true }
+arrow-ipc = { version = "43.0.0", optional = true }
 # Intentionally not a path dependency as object_store is released separately
 object_store = { version = "0.6", default-features = false, optional = true }
 

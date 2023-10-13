@@ -385,6 +385,7 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         self.buf.into_inner()
     }
     pub(crate) fn write_trailing_bytes(&mut self, target: W) -> Result<W> {
+        self.buf.flush()?;
         let start_pos = self.buf.bytes_written();
         // swap the writer to a byte array writer so we can write the trailing bytes.
         let mut writer = TrackedWrite::new( target);

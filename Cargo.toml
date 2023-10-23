@@ -77,20 +77,20 @@ edition = "2021"
 rust-version = "1.62"
 
 [workspace.dependencies]
-arrow = { version = "50.0.0", path = "./arrow", default-features = false }
-arrow-arith = { version = "50.0.0", path = "./arrow-arith" }
-arrow-array = { version = "50.0.0", path = "./arrow-array" }
-arrow-buffer = { version = "50.0.0", path = "./arrow-buffer" }
-arrow-cast = { version = "50.0.0", path = "./arrow-cast" }
-arrow-csv = { version = "50.0.0", path = "./arrow-csv" }
-arrow-data = { version = "50.0.0", path = "./arrow-data" }
-arrow-ipc = { version = "50.0.0", path = "./arrow-ipc" }
-arrow-json = { version = "50.0.0", path = "./arrow-json" }
-arrow-ord = { version = "50.0.0", path = "./arrow-ord" }
-arrow-row = { version = "50.0.0", path = "./arrow-row" }
-arrow-schema = { version = "50.0.0", path = "./arrow-schema" }
-arrow-select = { version = "50.0.0", path = "./arrow-select" }
-arrow-string = { version = "50.0.0", path = "./arrow-string" }
-parquet = { version = "50.0.0", path = "./parquet", default-features = false }
+arrow = { version = "50.0.0", default-features = false }
+arrow-arith = { version = "50.0.0" }
+arrow-array = { version = "50.0.0" }
+arrow-buffer = { version = "50.0.0"}
+arrow-cast = { version = "50.0.0" }
+arrow-csv = { version = "50.0.0" }
+arrow-data = { version = "50.0.0" }
+arrow-ipc = { version = "50.0.0" }
+arrow-json = { version = "50.0.0" }
+arrow-ord = { version = "50.0.0" }
+arrow-row = { version = "50.0.0" }
+arrow-schema = { version = "50.0.0" }
+arrow-select = { version = "50.0.0" }
+arrow-string = { version = "50.0.0" }
+parquet = { version = "50.0.0", default-features = false }
 
 chrono = { version = "0.4.31", default-features = false, features = ["clock"] }

@@ -483,7 +483,7 @@ struct GCSMultipartUpload {
 #[async_trait]
 impl PutPart for GCSMultipartUpload {
     /// Upload an object part <https://cloud.google.com/storage/docs/xml-api/put-object-multipart>
-    async fn put_part(&self, buf: Vec<u8>, part_idx: usize) -> Result<PartId> {
+    async fn put_part(&self, buf: Bytes, part_idx: usize) -> Result<PartId> {
         let upload_id = self.multipart_id.clone();
         let url = format!(
             "{}/{}/{}",
@@ -588,11 +588,43 @@ impl ObjectStore for GoogleCloudStorage {
         Ok((upload_id, Box::new(WriteMultiPart::new(inner, 8))))
     }
 
-    async fn abort_multipart(
+    async fn initiate_multipart_upload(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+        let id = self.client.multipart_initiate(location).await?;
+
+        
+        let encoded_path =
+            percent_encode(location.to_string().as_bytes(), NON_ALPHANUMERIC).to_string();
+
+        let upload = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            encoded_path,
+            multipart_id: id.clone(),
+        };
+
+        Ok((id, Box::new(upload)))
+    }
+
+    async fn get_put_part(
         &self,
         location: &Path,
         multipart_id: &MultipartId,
-    ) -> Result<()> {
+    ) -> Result<Box<dyn PutPart>> {
+        let encoded_path =
+            percent_encode(location.to_string().as_bytes(), NON_ALPHANUMERIC).to_string();
+
+        let upload = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            encoded_path,
+            multipart_id: multipart_id.clone(),
+        };
+
+        Ok(Box::new(upload))
+    }
+
+    async fn abort_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
         self.client
             .multipart_cleanup(location.as_ref(), multipart_id)
             .await?;

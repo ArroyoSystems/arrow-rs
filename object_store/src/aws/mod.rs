@@ -233,11 +233,36 @@ impl ObjectStore for AmazonS3 {
         Ok((id, Box::new(WriteMultiPart::new(upload, 8))))
     }
 
-    async fn abort_multipart(
+    async fn initiate_multipart_upload(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+        let id = self.client.create_multipart(location).await?;
+
+        let upload = S3MultiPartUpload {
+            location: location.clone(),
+            upload_id: id.clone(),
+            client: Arc::clone(&self.client),
+        };
+
+        Ok((id, Box::new(upload)))
+    }
+
+    async fn get_put_part(
         &self,
         location: &Path,
         multipart_id: &MultipartId,
-    ) -> Result<()> {
+    ) -> Result<Box<dyn PutPart>> {
+        let upload = S3MultiPartUpload {
+            location: location.clone(),
+            upload_id: multipart_id.clone(),
+            client: Arc::clone(&self.client),
+        };
+
+        Ok(Box::new(upload))
+    }
+
+    async fn abort_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
         self.client
             .delete_request(location, &[("uploadId", multipart_id)])
             .await
@@ -311,7 +336,7 @@ struct S3MultiPartUpload {
 
 #[async_trait]
 impl PutPart for S3MultiPartUpload {
-    async fn put_part(&self, buf: Vec<u8>, part_idx: usize) -> Result<PartId> {
+    async fn put_part(&self, buf: Bytes, part_idx: usize) -> Result<PartId> {
         use reqwest::header::ETAG;
         let part = (part_idx + 1).to_string();
 
@@ -319,7 +344,7 @@ impl PutPart for S3MultiPartUpload {
             .client
             .put_request(
                 &self.location,
-                buf.into(),
+                buf,
                 &[("partNumber", &part), ("uploadId", &self.upload_id)],
             )
             .await?;

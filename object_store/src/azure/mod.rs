@@ -188,11 +188,32 @@ impl ObjectStore for MicrosoftAzure {
         Ok((String::new(), Box::new(WriteMultiPart::new(inner, 8))))
     }
 
-    async fn abort_multipart(
+    async fn initiate_multipart_upload(
         &self,
-        _location: &Path,
+        location: &Path,
+    ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+        let inner = AzureMultiPartUpload {
+            client: Arc::clone(&self.client),
+            location: location.to_owned(),
+        };
+
+        Ok((String::new(), Box::new(inner)))
+    }
+
+    async fn get_put_part(
+        &self,
+        location: &Path,
         _multipart_id: &MultipartId,
-    ) -> Result<()> {
+    ) -> Result<Box<dyn PutPart>> {
+        let inner = AzureMultiPartUpload {
+            client: Arc::clone(&self.client),
+            location: location.to_owned(),
+        };
+
+        Ok(Box::new(inner))
+    }
+
+    async fn abort_multipart(&self, _location: &Path, _multipart_id: &MultipartId) -> Result<()> {
         // There is no way to drop blocks that have been uploaded. Instead, they simply
         // expire in 7 days.
         Ok(())
@@ -243,7 +264,7 @@ struct AzureMultiPartUpload {
 
 #[async_trait]
 impl PutPart for AzureMultiPartUpload {
-    async fn put_part(&self, buf: Vec<u8>, part_idx: usize) -> Result<PartId> {
+    async fn put_part(&self, buf: Bytes, part_idx: usize) -> Result<PartId> {
         let content_id = format!("{part_idx:20}");
         let block_id: BlockId = content_id.clone().into();
 

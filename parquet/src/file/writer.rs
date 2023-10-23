@@ -357,9 +357,23 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         self.buf.into_inner()
     }
 
+
     /// Returns the number of bytes written to this instance
     pub fn bytes_written(&self) -> usize {
         self.buf.bytes_written()
+    }
+    
+    pub(crate) fn write_trailing_bytes(&mut self, target: W) -> Result<W> {
+        self.buf.flush()?;
+        let start_pos = self.buf.bytes_written();
+        // swap the writer to a byte array writer so we can write the trailing bytes.
+        let mut writer = TrackedWrite::new( target);
+        writer.bytes_written = start_pos;
+        std::mem::swap(&mut self.buf, &mut writer);
+        self.write_metadata()?;
+        // swap back to the original writer
+        std::mem::swap(&mut self.buf, &mut writer);
+        Ok(writer.into_inner()?)
     }
 }
 

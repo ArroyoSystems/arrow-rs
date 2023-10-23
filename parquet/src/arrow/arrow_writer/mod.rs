@@ -233,6 +233,9 @@ impl<W: Write + Send> ArrowWriter<W> {
         self.flush()?;
         self.writer.close()
     }
+    pub fn get_trailing_bytes(&mut self, target: W) -> Result<W> {
+        self.writer.write_trailing_bytes(target)
+    }
 }
 
 impl<W: Write + Send> RecordBatchWriter for ArrowWriter<W> {

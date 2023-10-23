@@ -37,7 +37,7 @@ type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Sen
 #[async_trait]
 pub trait PutPart: Send + Sync + 'static {
     /// Upload a single part
-    async fn put_part(&self, buf: Vec<u8>, part_idx: usize) -> Result<PartId>;
+    async fn put_part(&self, buf: Bytes, part_idx: usize) -> Result<PartId>;
 
     /// Complete the upload with the provided parts
     ///
@@ -142,7 +142,7 @@ impl<T: PutPart> WriteMultiPart<T> {
             let inner = Arc::clone(&self.inner);
             let part_idx = self.current_part_idx;
             self.tasks.push(Box::pin(async move {
-                let upload_part = inner.put_part(out_buffer, part_idx).await?;
+                let upload_part = inner.put_part(out_buffer.into(), part_idx).await?;
                 Ok((part_idx, upload_part))
             }));
         }
@@ -185,7 +185,7 @@ impl<T: PutPart> AsyncWrite for WriteMultiPart<T> {
             let inner = Arc::clone(&self.inner);
             let part_idx = self.current_part_idx;
             self.tasks.push(Box::pin(async move {
-                let upload_part = inner.put_part(out_buffer, part_idx).await?;
+                let upload_part = inner.put_part(out_buffer.into(), part_idx).await?;
                 Ok((part_idx, upload_part))
             }));
             self.current_part_idx += 1;

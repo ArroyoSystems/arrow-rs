@@ -495,6 +495,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+#[cfg(feature = "cloud")]
+use multipart::PutPart;
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
 #[cfg(not(target_arch = "wasm32"))]
@@ -551,6 +553,25 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         &self,
         location: &Path,
     ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)>;
+
+    /// Init multipart upload
+    #[cfg(feature = "cloud")]
+    async fn initiate_multipart_upload(
+        &self,
+        _location: &Path,
+    ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+        Err(Error::NotImplemented)
+    }
+
+    /// Get a multi-part upload that allows writing data in chunks
+    #[cfg(feature = "cloud")]
+    async fn get_put_part(
+        &self,
+        _location: &Path,
+        _multipart_id: &MultipartId,
+    ) -> Result<Box<dyn PutPart>> {
+        Err(Error::NotImplemented)
+    }
 
     /// Cleanup an aborted upload.
     ///
@@ -744,6 +765,24 @@ macro_rules! as_ref_impl {
                 location: &Path,
             ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
                 self.as_ref().put_multipart(location).await
+            }
+
+            #[cfg(feature = "cloud")]
+            async fn initiate_multipart_upload(
+                &self,
+                location: &Path,
+            ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+                self.as_ref().initiate_multipart_upload(location).await
+            }
+
+            /// Get a multi-part upload that allows writing data in chunks
+            #[cfg(feature = "cloud")]
+            async fn get_put_part(
+                &self,
+                location: &Path,
+                multipart_id: &MultipartId,
+            ) -> Result<Box<dyn PutPart>> {
+                self.as_ref().get_put_part(location, multipart_id).await
             }
 
             async fn abort_multipart(

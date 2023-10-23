@@ -91,7 +91,7 @@ struct GCSMultipartUpload {
 #[async_trait]
 impl PutPart for GCSMultipartUpload {
     /// Upload an object part <https://cloud.google.com/storage/docs/xml-api/put-object-multipart>
-    async fn put_part(&self, buf: Vec<u8>, part_idx: usize) -> Result<PartId> {
+    async fn put_part(&self, buf: Bytes, part_idx: usize) -> Result<PartId> {
         self.client
             .put_part(&self.path, &self.multipart_id, part_idx, buf.into())
             .await
@@ -125,6 +125,35 @@ impl ObjectStore for GoogleCloudStorage {
         };
 
         Ok((upload_id, Box::new(WriteMultiPart::new(inner, 8))))
+    }
+
+    async fn initiate_multipart_upload(
+        &self,
+        location: &Path,
+    ) -> Result<(MultipartId, Box<dyn PutPart>)> {
+        let id = self.client.multipart_initiate(location).await?;
+
+        let inner = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            path: location.clone(),
+            multipart_id: id.clone(),
+        };
+
+        Ok((id, Box::new(inner)))
+    }
+
+    async fn get_put_part(
+        &self,
+        location: &Path,
+        multipart_id: &MultipartId,
+    ) -> Result<Box<dyn PutPart>> {
+        let upload = GCSMultipartUpload {
+            client: Arc::clone(&self.client),
+            path: location.clone(),
+            multipart_id: multipart_id.clone(),
+        };
+
+        Ok(Box::new(upload))
     }
 
     async fn abort_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {

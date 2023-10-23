@@ -342,6 +342,9 @@ impl<W: Write + Send> ArrowWriter<W> {
     pub fn close(mut self) -> Result<crate::format::FileMetaData> {
         self.finish()
     }
+    pub fn get_trailing_bytes(&mut self, target: W) -> Result<W> {
+        self.writer.write_trailing_bytes(target)
+    }
 }
 
 impl<W: Write + Send> RecordBatchWriter for ArrowWriter<W> {

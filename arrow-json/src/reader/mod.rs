@@ -133,6 +133,7 @@
 //! ```
 //!
 
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
@@ -149,6 +150,7 @@ pub use schema::*;
 
 use crate::reader::boolean_array::BooleanArrayDecoder;
 use crate::reader::decimal_array::DecimalArrayDecoder;
+use crate::reader::json_array::JsonArrayDecoder;
 use crate::reader::list_array::ListArrayDecoder;
 use crate::reader::map_array::MapArrayDecoder;
 use crate::reader::null_array::NullArrayDecoder;
@@ -170,6 +172,7 @@ mod string_array;
 mod struct_array;
 mod tape;
 mod timestamp_array;
+mod json_array;
 
 /// A builder for [`Reader`] and [`Decoder`]
 pub struct ReaderBuilder {
@@ -280,15 +283,15 @@ impl ReaderBuilder {
 
     /// Create a [`Decoder`]
     pub fn build_decoder(self) -> Result<Decoder, ArrowError> {
-        let (data_type, nullable) = match self.is_field {
-            false => (DataType::Struct(self.schema.fields.clone()), false),
+        let (data_type, nullable, metadata) = match self.is_field {
+            false => (DataType::Struct(self.schema.fields.clone()), false, HashMap::new()),
             true => {
                 let field = &self.schema.fields[0];
-                (field.data_type().clone(), field.is_nullable())
+                (field.data_type().clone(), field.is_nullable(), field.metadata().clone())
             }
         };
 
-        let decoder = make_decoder(data_type, self.coerce_primitive, self.strict_mode, nullable)?;
+        let decoder = make_decoder(data_type, &metadata, self.coerce_primitive, self.strict_mode, nullable)?;
 
         let num_fields = self.schema.all_fields().len();
 
@@ -648,6 +651,7 @@ macro_rules! primitive_decoder {
 
 fn make_decoder(
     data_type: DataType,
+    metadata: &HashMap<String, String>,
     coerce_primitive: bool,
     strict_mode: bool,
     is_nullable: bool,
@@ -695,7 +699,13 @@ fn make_decoder(
         DataType::Decimal128(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal128Type>::new(p, s))),
         DataType::Decimal256(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal256Type>::new(p, s))),
         DataType::Boolean => Ok(Box::<BooleanArrayDecoder>::default()),
-        DataType::Utf8 => Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive))),
+        DataType::Utf8 => {
+            if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
+              Ok(Box::new(JsonArrayDecoder::new(is_nullable)))
+            } else {
+               Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive)))
+            }
+        },
         DataType::LargeUtf8 => Ok(Box::new(StringArrayDecoder::<i64>::new(coerce_primitive))),
         DataType::List(_) => Ok(Box::new(ListArrayDecoder::<i32>::new(data_type, coerce_primitive, strict_mode, is_nullable)?)),
         DataType::LargeList(_) => Ok(Box::new(ListArrayDecoder::<i64>::new(data_type, coerce_primitive, strict_mode, is_nullable)?)),
@@ -710,6 +720,7 @@ fn make_decoder(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use serde_json::json;
     use std::fs::File;
     use std::io::{BufReader, Cursor, Seek};
@@ -717,7 +728,7 @@ mod tests {
 
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int32Type;
-    use arrow_array::{make_array, Array, BooleanArray, ListArray, StringArray, StructArray};
+    use arrow_array::{make_array, Array, BooleanArray, ListArray, StringArray, StructArray, Float64Array};
     use arrow_buffer::{ArrowNativeType, Buffer};
     use arrow_cast::display::{ArrayFormatter, FormatOptions};
     use arrow_data::ArrayDataBuilder;
@@ -2258,5 +2269,71 @@ mod tests {
             .as_primitive::<TimestampMicrosecondType>()
             .values();
         assert_eq!(values, &[1699148028689, 2, 3, 4]);
+    }
+    
+    fn test_deserialize_raw_json() {
+        let json_content = r#"{
+          "a": 5,
+          "b": {
+            "c": [1, 2, 3],
+            "d": { "e" : "hello" }
+          },
+          "c": 10
+        }"#;
+
+        let mut meta = HashMap::new();
+        meta.insert("ARROW:extension:name".to_string(), "arroyo.json".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, false)
+                .with_metadata(meta),
+            Field::new("c", DataType::Int64, false)
+        ]));
+
+        let batches = do_read(json_content, 1024, false, false, schema);
+        assert_eq!(batches.len(), 1);
+
+        let a = batches[0].column(0).as_primitive::<Int64Type>().value(0);
+        let b = batches[0].column(1).as_string::<i32>().value(0);
+        let c = batches[0].column(2).as_primitive::<Int64Type>().value(0);
+
+        assert_eq!(a, 5);
+        assert_eq!(b, "{\"c\":[1,2,3],\"d\":{\"e\":\"hello\"}}");
+        assert_eq!(c, 10);
+    }
+
+    #[test]
+    fn test_deserialize_nullable_raw_json() {
+        let json_content = r#"{
+          "a": 5,
+          "b": null,
+          "c": 10
+        }"#;
+
+        let mut meta = HashMap::new();
+        meta.insert("ARROW:extension:name".to_string(), "arroyo.json".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, true)
+                .with_metadata(meta),
+            Field::new("c", DataType::Int64, false)
+        ]));
+
+        let batches = do_read(json_content, 1024, false, false, schema);
+        assert_eq!(batches.len(), 1);
+
+        let a = batches[0].column(0).as_primitive::<Int64Type>().value(0);
+        let b = batches[0].columns().get(1).unwrap().as_any().downcast_ref::<StringArray>()
+            .unwrap()
+            .nulls()
+            .unwrap()
+            .inner()
+            .value(0);
+
+        let c = batches[0].column(2).as_primitive::<Int64Type>().value(0);
+
+        assert_eq!(a, 5);
+        assert_eq!(b, false);
+        assert_eq!(c, 10);
     }
 }

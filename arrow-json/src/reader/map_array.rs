@@ -56,12 +56,14 @@ impl MapArrayDecoder {
 
         let keys = make_decoder(
             fields[0].data_type().clone(),
+            fields[0].metadata(),
             coerce_primitive,
             strict_mode,
             fields[0].is_nullable(),
         )?;
         let values = make_decoder(
             fields[1].data_type().clone(),
+            fields[1].metadata(),
             coerce_primitive,
             strict_mode,
             fields[1].is_nullable(),

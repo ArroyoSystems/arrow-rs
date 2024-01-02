@@ -45,6 +45,7 @@ impl StructArrayDecoder {
                 let nullable = f.is_nullable() || is_nullable;
                 make_decoder(
                     f.data_type().clone(),
+                    f.metadata(),
                     coerce_primitive,
                     strict_mode,
                     nullable,

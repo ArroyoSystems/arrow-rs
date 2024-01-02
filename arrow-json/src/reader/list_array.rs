@@ -45,6 +45,7 @@ impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
         };
         let decoder = make_decoder(
             field.data_type().clone(),
+            field.metadata(),
             coerce_primitive,
             strict_mode,
             field.is_nullable(),

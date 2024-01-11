@@ -95,6 +95,7 @@
 
 use std::iter;
 use std::{fmt::Debug, io::Write};
+use std::collections::HashMap;
 
 use serde_json::map::Map as JsonMap;
 use serde_json::Value;
@@ -131,8 +132,8 @@ fn struct_array_to_jsonmap_array(
         .take(array.len())
         .collect::<Vec<JsonMap<String, Value>>>();
 
-    for (j, struct_col) in array.columns().iter().enumerate() {
-        set_column_for_json_rows(&mut inner_objs, struct_col, inner_col_names[j])?
+    for (j, (struct_col, field)) in array.columns().iter().zip(array.fields().iter()).enumerate() {
+        set_column_for_json_rows(&mut inner_objs, struct_col, field.metadata(), inner_col_names[j])?
     }
     Ok(inner_objs)
 }
@@ -252,6 +253,7 @@ fn set_column_by_primitive_type<T>(
 fn set_column_for_json_rows(
     rows: &mut [JsonMap<String, Value>],
     array: &ArrayRef,
+    metadata: &HashMap<String, String>,
     col_name: &str,
 ) -> Result<(), ArrowError> {
     match array.data_type() {
@@ -295,7 +297,21 @@ fn set_column_for_json_rows(
             set_column_by_array_type!(as_boolean_array, col_name, rows, array);
         }
         DataType::Utf8 => {
-            set_column_by_array_type!(as_string_array, col_name, rows, array);
+            if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
+                let arr = as_string_array(array);
+                rows
+                    .iter_mut()
+                    .zip(arr.iter())
+                    .for_each(|(row, maybe_value)| {
+                        if let Some(v) = maybe_value {
+                            if let Ok(v) = serde_json::from_str(v) {
+                                row.insert(col_name.to_string(), v);
+                            }
+                        }
+                    })
+            } else {
+                set_column_by_array_type!(as_string_array, col_name, rows, array);
+            }
         }
         DataType::LargeUtf8 => {
             set_column_by_array_type!(as_largestring_array, col_name, rows, array);
@@ -350,7 +366,7 @@ fn set_column_for_json_rows(
         DataType::Dictionary(_, value_type) => {
             let hydrated = arrow_cast::cast::cast(&array, value_type)
                 .expect("cannot cast dictionary to underlying values");
-            set_column_for_json_rows(rows, &hydrated, col_name)?;
+            set_column_for_json_rows(rows, &hydrated, &metadata, col_name)?;
         }
         DataType::Map(_, _) => {
             let maparr = as_map_array(array);
@@ -412,9 +428,9 @@ pub fn record_batches_to_json_rows(
         for batch in batches {
             let row_count = batch.num_rows();
             let row_slice = &mut rows[base..base + batch.num_rows()];
-            for (j, col) in batch.columns().iter().enumerate() {
+            for (j, (col, field)) in batch.columns().iter().zip(batch.schema().fields()).enumerate() {
                 let col_name = schema.field(j).name();
-                set_column_for_json_rows(row_slice, col, col_name)?
+                set_column_for_json_rows(row_slice, col, field.metadata(), col_name)?
             }
             base += row_count;
         }

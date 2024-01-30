@@ -97,6 +97,7 @@
 //! In order to explicitly write null values for keys, configure a custom [`Writer`] by
 //! using a [`WriterBuilder`] to construct a [`Writer`].
 
+use std::collections::HashMap;
 use std::iter;
 use std::{fmt::Debug, io::Write};
 
@@ -138,10 +139,16 @@ fn struct_array_to_jsonmap_array(
         .map(|index| array.is_valid(index).then(JsonMap::new))
         .collect::<Vec<Option<JsonMap<String, Value>>>>();
 
-    for (j, struct_col) in array.columns().iter().enumerate() {
+    for (j, (struct_col, field)) in array
+        .columns()
+        .iter()
+        .zip(array.fields().iter())
+        .enumerate()
+    {
         set_column_for_json_rows(
             &mut inner_objs,
             struct_col,
+            field.metadata(),
             inner_col_names[j],
             explicit_nulls,
         )?
@@ -294,6 +301,7 @@ fn set_column_by_primitive_type<T>(
 fn set_column_for_json_rows(
     rows: &mut [Option<JsonMap<String, Value>>],
     array: &ArrayRef,
+    metadata: &HashMap<String, String>,
     col_name: &str,
     explicit_nulls: bool,
 ) -> Result<(), ArrowError> {
@@ -344,7 +352,22 @@ fn set_column_for_json_rows(
             set_column_by_array_type!(as_boolean_array, col_name, rows, array, explicit_nulls);
         }
         DataType::Utf8 => {
-            set_column_by_array_type!(as_string_array, col_name, rows, array, explicit_nulls);
+            if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
+                let arr = as_string_array(array);
+                rows.iter_mut()
+                    .zip(arr.iter())
+                    .for_each(|(row, maybe_value)| {
+                        if let Some(v) = maybe_value {
+                            if let Ok(v) = serde_json::from_str(v) {
+                                if let Some(row) = row {
+                                    row.insert(col_name.to_string(), v);
+                                }
+                            }
+                        }
+                    })
+            } else {
+                set_column_by_array_type!(as_string_array, col_name, rows, array, explicit_nulls);
+            }
         }
         DataType::LargeUtf8 => {
             set_column_by_array_type!(as_largestring_array, col_name, rows, array, explicit_nulls);
@@ -428,7 +451,7 @@ fn set_column_for_json_rows(
         DataType::Dictionary(_, value_type) => {
             let hydrated = arrow_cast::cast::cast(&array, value_type)
                 .expect("cannot cast dictionary to underlying values");
-            set_column_for_json_rows(rows, &hydrated, col_name, explicit_nulls)?;
+            set_column_for_json_rows(rows, &hydrated, &metadata, col_name, explicit_nulls)?;
         }
         DataType::Map(_, _) => {
             let maparr = as_map_array(array);
@@ -502,9 +525,20 @@ fn record_batches_to_json_rows_internal(
         for batch in batches {
             let row_count = batch.num_rows();
             let row_slice = &mut rows[base..base + batch.num_rows()];
-            for (j, col) in batch.columns().iter().enumerate() {
+            for (j, (col, field)) in batch
+                .columns()
+                .iter()
+                .zip(batch.schema().fields())
+                .enumerate()
+            {
                 let col_name = schema.field(j).name();
-                set_column_for_json_rows(row_slice, col, col_name, explicit_nulls)?
+                set_column_for_json_rows(
+                    row_slice,
+                    col,
+                    field.metadata(),
+                    col_name,
+                    explicit_nulls,
+                )?
             }
             base += row_count;
         }

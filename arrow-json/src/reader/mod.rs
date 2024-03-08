@@ -180,6 +180,7 @@ pub struct ReaderBuilder {
     coerce_primitive: bool,
     strict_mode: bool,
     is_field: bool,
+    limit_to_batch_size: bool,
 
     schema: SchemaRef,
 }
@@ -200,6 +201,7 @@ impl ReaderBuilder {
             strict_mode: false,
             is_field: false,
             schema,
+            limit_to_batch_size: true,
         }
     }
 
@@ -240,12 +242,22 @@ impl ReaderBuilder {
             strict_mode: false,
             is_field: true,
             schema: Arc::new(Schema::new([field.into()])),
+            limit_to_batch_size: true,
         }
     }
 
     /// Sets the batch size in rows to read
     pub fn with_batch_size(self, batch_size: usize) -> Self {
         Self { batch_size, ..self }
+    }
+
+    /// Configures whether the reader will limit the input to the configured batch size or
+    /// allow unlimited input, relying on the caller to flush
+    pub fn with_limit_to_batch_size(self, limit_to_batch_size: bool) -> Self {
+        Self {
+            limit_to_batch_size,
+            ..self
+        }
     }
 
     /// Sets if the decoder should coerce primitive values (bool and number) into string
@@ -312,7 +324,7 @@ impl ReaderBuilder {
         Ok(Decoder {
             decoder,
             is_field: self.is_field,
-            tape_decoder: TapeDecoder::new(self.batch_size, num_fields),
+            tape_decoder: TapeDecoder::new(self.batch_size, num_fields, self.limit_to_batch_size),
             batch_size: self.batch_size,
             schema: self.schema,
         })

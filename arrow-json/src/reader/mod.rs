@@ -143,7 +143,8 @@ use serde::Serialize;
 use arrow_array::timezone::Tz;
 use arrow_array::types::Float32Type;
 use arrow_array::types::*;
-use arrow_array::{downcast_integer, make_array, RecordBatch, RecordBatchReader, StructArray};
+use arrow_array::{downcast_integer, make_array, RecordBatch, RecordBatchReader, StringArray, StructArray};
+use arrow_array::builder::StringBuilder;
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
 pub use schema::*;
@@ -682,6 +683,47 @@ impl Decoder {
         };
 
         Ok(Some(batch))
+    }
+    
+    pub fn flush_with_bad_data(&mut self) -> Result<Option<(RecordBatch, Option<StringArray>)>, ArrowError> {
+        let tape = self.tape_decoder.finish()?;
+
+        if tape.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        // First offset is null sentinel
+        let mut next_object = 1;
+
+        let (good, bad): (Vec<_>, Vec<_>) = (0..tape.num_rows())
+            .map(|_| {
+                let next = tape.next(next_object, "row").unwrap();
+                std::mem::replace(&mut next_object, next)
+            })
+            .partition(|p| {
+                self.decoder.validate_row(&tape, *p)
+            });
+
+        let bad_data = if !bad.is_empty() {
+            let mut json = JsonArrayDecoder::new(false);
+            let v = json.decode(&tape, &bad).unwrap();
+            Some(v.into())
+        } else {
+            None
+        };
+        
+        let decoded = self.decoder.decode(&tape, &good)?;
+        self.tape_decoder.clear();
+
+        let batch = match self.is_field {
+            true => RecordBatch::try_new(self.schema.clone(), vec![make_array(decoded)])?,
+            false => {
+                RecordBatch::from(StructArray::from(decoded)).with_schema(self.schema.clone())?
+            }
+        };
+
+        Ok(Some((batch, bad_data)))
+        
     }
 }
 

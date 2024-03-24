@@ -152,6 +152,55 @@ impl ArrayDecoder for StructArrayDecoder {
         // Validated lengths above
         Ok(unsafe { data.build_unchecked() })
     }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        let end_idx = match (tape.get(pos), self.is_nullable) {
+            (TapeElement::StartObject(end_idx), _) => end_idx,
+            (TapeElement::Null, true) => {
+                return true;
+            }
+            _ => {
+                return false;
+            }
+        };
+
+        let fields = struct_fields(&self.data_type);
+        
+        let mut cur_idx = pos + 1;
+        while cur_idx < end_idx {
+            // Read field name
+            let field_name = match tape.get(cur_idx) {
+                TapeElement::String(s) => tape.get_string(s),
+                _ => return false,
+            };
+
+            // Update child pos if match found
+            match fields.iter().position(|x| x.name() == field_name) {
+                Some(field_idx) => {
+                    let child_pos = cur_idx + 1;
+                    if !self.decoders[field_idx]
+                        .validate_row(tape, child_pos) {
+                        return false;
+                    }
+                } 
+                None => {
+                    if self.strict_mode {
+                        return false;
+                    }
+                }
+            }
+
+            // Advance to next field
+            cur_idx = match tape.next(cur_idx + 1, "field value") {
+                Ok(i) => i,
+                Err(_) => {
+                    return false;
+                }
+            }
+        }
+        
+        true
+    }
 }
 
 fn struct_fields(data_type: &DataType) -> &Fields {

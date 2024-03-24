@@ -89,4 +89,11 @@ impl ArrayDecoder for JsonArrayDecoder {
 
         Ok(builder.finish().into_data())
     }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            _ => true,
+        }
+    }
 }

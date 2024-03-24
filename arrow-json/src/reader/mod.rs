@@ -181,7 +181,7 @@ pub struct ReaderBuilder {
     strict_mode: bool,
     is_field: bool,
     limit_to_batch_size: bool,
-
+    allow_bad_data: bool,
     schema: SchemaRef,
 }
 
@@ -200,8 +200,9 @@ impl ReaderBuilder {
             coerce_primitive: false,
             strict_mode: false,
             is_field: false,
-            schema,
+            allow_bad_data: false,
             limit_to_batch_size: true,
+            schema,
         }
     }
 
@@ -241,6 +242,7 @@ impl ReaderBuilder {
             coerce_primitive: false,
             strict_mode: false,
             is_field: true,
+            allow_bad_data: false,
             schema: Arc::new(Schema::new([field.into()])),
             limit_to_batch_size: true,
         }
@@ -285,6 +287,16 @@ impl ReaderBuilder {
         }
     }
 
+    /// Sets if the decoder should continue decoding when encountering records that do not
+    /// match the schema. If set, the schema is made nullable as bad data records will be
+    /// recorded as null values.
+    pub fn with_allow_dad_data(self, allow_bad_data: bool) -> Self {
+        Self {
+            allow_bad_data,
+            ..self
+        }
+    }
+
     /// Create a [`Reader`] with the provided [`BufRead`]
     pub fn build<R: BufRead>(self, reader: R) -> Result<Reader<R>, ArrowError> {
         Ok(Reader {
@@ -305,7 +317,7 @@ impl ReaderBuilder {
                 let field = &self.schema.fields[0];
                 (
                     field.data_type().clone(),
-                    field.is_nullable(),
+                    field.is_nullable() || self.allow_bad_data,
                     field.metadata().clone(),
                 )
             }
@@ -327,6 +339,7 @@ impl ReaderBuilder {
             tape_decoder: TapeDecoder::new(self.batch_size, num_fields, self.limit_to_batch_size),
             batch_size: self.batch_size,
             schema: self.schema,
+            allow_bad_data: self.allow_bad_data,
         })
     }
 }
@@ -427,6 +440,7 @@ pub struct Decoder {
     batch_size: usize,
     is_field: bool,
     schema: SchemaRef,
+    allow_bad_data: bool,
 }
 
 impl std::fmt::Debug for Decoder {
@@ -643,12 +657,19 @@ impl Decoder {
 
         // First offset is null sentinel
         let mut next_object = 1;
-        let pos: Vec<_> = (0..tape.num_rows())
+        let pos = (0..tape.num_rows())
             .map(|_| {
                 let next = tape.next(next_object, "row").unwrap();
                 std::mem::replace(&mut next_object, next)
-            })
-            .collect();
+            });
+        
+        let pos: Vec<_> = if self.allow_bad_data {
+            // filter out invalid rows before we attempt to deserialize
+            pos.filter(|p| self.decoder.validate_row(&tape, *p))
+                .collect()
+        } else {
+            pos.collect()
+        };
 
         let decoded = self.decoder.decode(&tape, &pos)?;
         self.tape_decoder.clear();
@@ -667,11 +688,14 @@ impl Decoder {
 trait ArrayDecoder: Send {
     /// Decode elements from `tape` starting at the indexes contained in `pos`
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError>;
+
+    /// Returns true if the row matches the schema
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool;
 }
 
 macro_rules! primitive_decoder {
-    ($t:ty, $data_type:expr) => {
-        Ok(Box::new(PrimitiveArrayDecoder::<$t>::new($data_type)))
+    ($t:ty, $data_type:expr, $is_nullable:expr) => {
+        Ok(Box::new(PrimitiveArrayDecoder::<$t>::new($data_type, $is_nullable)))
     };
 }
 
@@ -683,56 +707,56 @@ fn make_decoder(
     is_nullable: bool,
 ) -> Result<Box<dyn ArrayDecoder>, ArrowError> {
     downcast_integer! {
-        data_type => (primitive_decoder, data_type),
+        data_type => (primitive_decoder, data_type, is_nullable),
         DataType::Null => Ok(Box::<NullArrayDecoder>::default()),
-        DataType::Float16 => primitive_decoder!(Float16Type, data_type),
-        DataType::Float32 => primitive_decoder!(Float32Type, data_type),
-        DataType::Float64 => primitive_decoder!(Float64Type, data_type),
+        DataType::Float16 => primitive_decoder!(Float16Type, data_type, is_nullable),
+        DataType::Float32 => primitive_decoder!(Float32Type, data_type, is_nullable),
+        DataType::Float64 => primitive_decoder!(Float64Type, data_type, is_nullable),
         DataType::Timestamp(TimeUnit::Second, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, Utc, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Millisecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, Utc, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, Utc, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, Utc, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Second, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, tz, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Millisecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, tz, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Microsecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, tz, is_nullable)))
         },
         DataType::Timestamp(TimeUnit::Nanosecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, tz, is_nullable)))
         },
-        DataType::Date32 => primitive_decoder!(Date32Type, data_type),
-        DataType::Date64 => primitive_decoder!(Date64Type, data_type),
-        DataType::Time32(TimeUnit::Second) => primitive_decoder!(Time32SecondType, data_type),
-        DataType::Time32(TimeUnit::Millisecond) => primitive_decoder!(Time32MillisecondType, data_type),
-        DataType::Time64(TimeUnit::Microsecond) => primitive_decoder!(Time64MicrosecondType, data_type),
-        DataType::Time64(TimeUnit::Nanosecond) => primitive_decoder!(Time64NanosecondType, data_type),
-        DataType::Decimal128(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal128Type>::new(p, s))),
-        DataType::Decimal256(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal256Type>::new(p, s))),
-        DataType::Boolean => Ok(Box::<BooleanArrayDecoder>::default()),
+        DataType::Date32 => primitive_decoder!(Date32Type, data_type, is_nullable),
+        DataType::Date64 => primitive_decoder!(Date64Type, data_type, is_nullable),
+        DataType::Time32(TimeUnit::Second) => primitive_decoder!(Time32SecondType, data_type, is_nullable),
+        DataType::Time32(TimeUnit::Millisecond) => primitive_decoder!(Time32MillisecondType, data_type, is_nullable),
+        DataType::Time64(TimeUnit::Microsecond) => primitive_decoder!(Time64MicrosecondType, data_type, is_nullable),
+        DataType::Time64(TimeUnit::Nanosecond) => primitive_decoder!(Time64NanosecondType, data_type, is_nullable),
+        DataType::Decimal128(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal128Type>::new(p, s, is_nullable))),
+        DataType::Decimal256(p, s) => Ok(Box::new(DecimalArrayDecoder::<Decimal256Type>::new(p, s, is_nullable))),
+        DataType::Boolean => Ok(Box::new(BooleanArrayDecoder::new(is_nullable))),
         DataType::Utf8 => {
             if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
               Ok(Box::new(JsonArrayDecoder::new(is_nullable)))
             } else {
-               Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive)))
+               Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive, is_nullable)))
             }
         },
-        DataType::LargeUtf8 => Ok(Box::new(StringArrayDecoder::<i64>::new(coerce_primitive))),
+        DataType::LargeUtf8 => Ok(Box::new(StringArrayDecoder::<i64>::new(coerce_primitive, is_nullable))),
         DataType::List(_) => Ok(Box::new(ListArrayDecoder::<i32>::new(data_type, coerce_primitive, strict_mode, is_nullable)?)),
         DataType::LargeList(_) => Ok(Box::new(ListArrayDecoder::<i64>::new(data_type, coerce_primitive, strict_mode, is_nullable)?)),
         DataType::Struct(_) => Ok(Box::new(StructArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable)?)),

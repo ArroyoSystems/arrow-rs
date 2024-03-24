@@ -23,10 +23,19 @@ use arrow_schema::ArrowError;
 use crate::reader::tape::{Tape, TapeElement};
 use crate::reader::ArrayDecoder;
 
-#[derive(Default)]
-pub struct BooleanArrayDecoder {}
+pub struct BooleanArrayDecoder {
+    is_nullable: bool
+}
 
-impl ArrayDecoder for BooleanArrayDecoder {
+impl BooleanArrayDecoder {
+    pub fn new(is_nullable: bool) -> Self {
+        Self {
+            is_nullable
+        }
+    }
+}
+
+impl ArrayDecoder for BooleanArrayDecoder {    
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
         let mut builder = BooleanBuilder::with_capacity(pos.len());
         for p in pos {
@@ -39,5 +48,13 @@ impl ArrayDecoder for BooleanArrayDecoder {
         }
 
         Ok(builder.finish().into_data())
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::True | TapeElement::False => true,
+            _ => false,
+        }  
     }
 }

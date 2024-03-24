@@ -29,13 +29,15 @@ const FALSE: &str = "false";
 
 pub struct StringArrayDecoder<O: OffsetSizeTrait> {
     coerce_primitive: bool,
+    is_nullable: bool,
     phantom: PhantomData<O>,
 }
 
 impl<O: OffsetSizeTrait> StringArrayDecoder<O> {
-    pub fn new(coerce_primitive: bool) -> Self {
+    pub fn new(coerce_primitive: bool, is_nullable: bool) -> Self {
         Self {
             coerce_primitive,
+            is_nullable,
             phantom: Default::default(),
         }
     }
@@ -125,5 +127,21 @@ impl<O: OffsetSizeTrait> ArrayDecoder for StringArrayDecoder<O> {
         }
 
         Ok(builder.finish().into_data())
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::String(_) => true,
+            TapeElement::Null => self.is_nullable,
+            TapeElement::True | TapeElement::False | 
+            TapeElement::Number(_) |
+            TapeElement::I64(_) | TapeElement::I32(_) | 
+            TapeElement::F32(_) | TapeElement::F64(_) => {
+                self.coerce_primitive
+            }
+            _ => {
+                false
+            }
+        }
     }
 }

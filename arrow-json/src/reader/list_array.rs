@@ -133,7 +133,7 @@ impl<O: OffsetSizeTrait> ArrayDecoder for ListArrayDecoder<O> {
                 return false;
             }
         }
-        
+
         true
     }
 }

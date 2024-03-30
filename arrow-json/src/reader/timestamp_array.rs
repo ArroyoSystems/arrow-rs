@@ -118,7 +118,7 @@ where
                 if let Ok(d) = string_to_datetime(&self.timezone, s) {
                     match P::UNIT {
                         TimeUnit::Nanosecond => d.timestamp_nanos_opt().is_some(),
-                        _ => true
+                        _ => true,
                     }
                 } else {
                     false
@@ -132,7 +132,7 @@ where
                     .is_ok()
             }
             TapeElement::I32(_) | TapeElement::I64(_) => true,
-            _ => false
+            _ => false,
         }
     }
 }

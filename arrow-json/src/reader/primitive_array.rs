@@ -90,7 +90,6 @@ impl<P: ArrowPrimitiveType> PrimitiveArrayDecoder<P> {
     }
 }
 
-
 impl<P> ArrayDecoder for PrimitiveArrayDecoder<P>
 where
     P: ArrowPrimitiveType + Parser,
@@ -159,7 +158,7 @@ where
 
         Ok(builder.finish().into_data())
     }
-    
+
     fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
         match tape.get(pos) {
             TapeElement::Null => self.is_nullable,
@@ -169,7 +168,8 @@ where
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);
-                let v: Option<<P as ArrowPrimitiveType>::Native> = ParseJsonNumber::parse(s.as_bytes());
+                let v: Option<<P as ArrowPrimitiveType>::Native> =
+                    ParseJsonNumber::parse(s.as_bytes());
                 v.is_some()
             }
             TapeElement::F32(v) => {

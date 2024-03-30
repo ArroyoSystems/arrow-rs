@@ -143,8 +143,10 @@ use serde::Serialize;
 use arrow_array::timezone::Tz;
 use arrow_array::types::Float32Type;
 use arrow_array::types::*;
-use arrow_array::{downcast_integer, make_array, RecordBatch, RecordBatchReader, StringArray, StructArray};
-use arrow_array::builder::StringBuilder;
+use arrow_array::{
+    downcast_integer, make_array, BooleanArray, RecordBatch, RecordBatchReader, StringArray,
+    StructArray,
+};
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
 pub use schema::*;
@@ -291,7 +293,7 @@ impl ReaderBuilder {
     /// Sets if the decoder should continue decoding when encountering records that do not
     /// match the schema. If set, the schema is made nullable as bad data records will be
     /// recorded as null values.
-    pub fn with_allow_dad_data(self, allow_bad_data: bool) -> Self {
+    pub fn with_allow_bad_data(self, allow_bad_data: bool) -> Self {
         Self {
             allow_bad_data,
             ..self
@@ -658,12 +660,11 @@ impl Decoder {
 
         // First offset is null sentinel
         let mut next_object = 1;
-        let pos = (0..tape.num_rows())
-            .map(|_| {
-                let next = tape.next(next_object, "row").unwrap();
-                std::mem::replace(&mut next_object, next)
-            });
-        
+        let pos = (0..tape.num_rows()).map(|_| {
+            let next = tape.next(next_object, "row").unwrap();
+            std::mem::replace(&mut next_object, next)
+        });
+
         let pos: Vec<_> = if self.allow_bad_data {
             // filter out invalid rows before we attempt to deserialize
             pos.filter(|p| self.decoder.validate_row(&tape, *p))
@@ -684,8 +685,17 @@ impl Decoder {
 
         Ok(Some(batch))
     }
-    
-    pub fn flush_with_bad_data(&mut self) -> Result<Option<(RecordBatch, Option<StringArray>)>, ArrowError> {
+
+    /// Flushes schema-conforming JSON in the current buffer to a [`RecordBatch`], and returns
+    /// an BooleanArray that marks good rows and an Option<StringArray> with invalid records, if
+    /// any exist
+    ///
+    /// Returns `Ok(None)` if no buffered data
+    ///
+    /// Note: if called part way through decoding a record, this will return an error
+    pub fn flush_with_bad_data(
+        &mut self,
+    ) -> Result<Option<(RecordBatch, BooleanArray, Option<StringArray>)>, ArrowError> {
         let tape = self.tape_decoder.finish()?;
 
         if tape.num_rows() == 0 {
@@ -694,14 +704,18 @@ impl Decoder {
 
         // First offset is null sentinel
         let mut next_object = 1;
+        let mut good_rows = Vec::with_capacity(tape.num_rows());
 
         let (good, bad): (Vec<_>, Vec<_>) = (0..tape.num_rows())
             .map(|_| {
                 let next = tape.next(next_object, "row").unwrap();
+
                 std::mem::replace(&mut next_object, next)
             })
             .partition(|p| {
-                self.decoder.validate_row(&tape, *p)
+                let valid = self.decoder.validate_row(&tape, *p);
+                good_rows.push(valid);
+                valid
             });
 
         let bad_data = if !bad.is_empty() {
@@ -711,7 +725,7 @@ impl Decoder {
         } else {
             None
         };
-        
+
         let decoded = self.decoder.decode(&tape, &good)?;
         self.tape_decoder.clear();
 
@@ -722,8 +736,7 @@ impl Decoder {
             }
         };
 
-        Ok(Some((batch, bad_data)))
-        
+        Ok(Some((batch, good_rows.into(), bad_data)))
     }
 }
 
@@ -737,7 +750,10 @@ trait ArrayDecoder: Send {
 
 macro_rules! primitive_decoder {
     ($t:ty, $data_type:expr, $is_nullable:expr) => {
-        Ok(Box::new(PrimitiveArrayDecoder::<$t>::new($data_type, $is_nullable)))
+        Ok(Box::new(PrimitiveArrayDecoder::<$t>::new(
+            $data_type,
+            $is_nullable,
+        )))
     };
 }
 
@@ -847,6 +863,7 @@ mod tests {
             unbuffered = ReaderBuilder::new(schema.clone())
                 .with_batch_size(batch_size)
                 .with_coerce_primitive(coerce_primitive)
+                .with_allow_bad_data(true)
                 .build(Cursor::new(buf.as_bytes()))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
@@ -2478,5 +2495,78 @@ mod tests {
         assert_eq!(a, 5);
         assert_eq!(b, false);
         assert_eq!(c, 10);
+    }
+
+    #[test]
+    fn test_deserialize_bad_data() {
+        let j1 = r#"{"a":5,"b":{"d":5},"c":10,"e":[1,2,3]}"#; // valid
+        let j2 = r#"{"a":5,"b":{"d":"nope"},"c":10}"#; // invalid
+        let j3 = r#"{"a":5,"c":10}"#; // invalid
+        let j4 = r#"{"a":5,"b":null,"c":10}"#; // invalid
+        let j5 = r#"{"a":5,"b":{"d":5},"c":10}"#; // valid
+        let j6 = r#"{"a":5,"b":{"d":5},"c":10,"e":["hello"]}"#; // invalid
+        let j7 = r#"{"a":5,"b":{"d":5},"c":10,"e":true}"#; // invalid
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new(
+                "b",
+                DataType::Struct(vec![Field::new("d", DataType::Int64, false)].into()),
+                false,
+            ),
+            Field::new("c", DataType::Int64, false),
+            Field::new(
+                "e",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
+                true,
+            ),
+        ]));
+
+        // allow_bad_data
+        let mut decoder = ReaderBuilder::new(schema.clone())
+            .with_batch_size(10)
+            .with_coerce_primitive(false)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(&j1.as_bytes()).unwrap();
+        decoder.decode(&j2.as_bytes()).unwrap();
+        decoder.decode(&j3.as_bytes()).unwrap();
+        decoder.decode(&j4.as_bytes()).unwrap();
+        decoder.decode(&j5.as_bytes()).unwrap();
+        decoder.decode(&j6.as_bytes()).unwrap();
+        decoder.decode(&j7.as_bytes()).unwrap();
+        let batch = decoder.flush().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        // flush_with_bad_data
+        let mut decoder = ReaderBuilder::new(schema.clone())
+            .with_batch_size(10)
+            .with_coerce_primitive(false)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(&j1.as_bytes()).unwrap();
+        decoder.decode(&j2.as_bytes()).unwrap();
+        decoder.decode(&j3.as_bytes()).unwrap();
+        decoder.decode(&j4.as_bytes()).unwrap();
+        decoder.decode(&j5.as_bytes()).unwrap();
+        decoder.decode(&j6.as_bytes()).unwrap();
+        decoder.decode(&j7.as_bytes()).unwrap();
+
+        let (good, mask, bad) = decoder.flush_with_bad_data().unwrap().unwrap();
+        assert_eq!(
+            mask,
+            vec![true, false, false, false, true, false, false].into()
+        );
+
+        assert_eq!(good.num_rows(), 2);
+        let bad = bad.unwrap();
+        assert_eq!(bad.value(0), j2);
+        assert_eq!(bad.value(1), j3);
+        assert_eq!(bad.value(2), j4);
+        assert_eq!(bad.value(3), j6);
+        assert_eq!(bad.value(4), j7);
     }
 }

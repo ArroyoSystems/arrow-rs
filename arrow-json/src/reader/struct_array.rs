@@ -165,7 +165,8 @@ impl ArrayDecoder for StructArrayDecoder {
         };
 
         let fields = struct_fields(&self.data_type);
-        
+        let mut validated_fields = vec![false; fields.len()];
+
         let mut cur_idx = pos + 1;
         while cur_idx < end_idx {
             // Read field name
@@ -178,11 +179,11 @@ impl ArrayDecoder for StructArrayDecoder {
             match fields.iter().position(|x| x.name() == field_name) {
                 Some(field_idx) => {
                     let child_pos = cur_idx + 1;
-                    if !self.decoders[field_idx]
-                        .validate_row(tape, child_pos) {
+                    if !self.decoders[field_idx].validate_row(tape, child_pos) {
                         return false;
                     }
-                } 
+                    validated_fields[field_idx] = true;
+                }
                 None => {
                     if self.strict_mode {
                         return false;
@@ -198,8 +199,16 @@ impl ArrayDecoder for StructArrayDecoder {
                 }
             }
         }
-        
-        true
+
+        validated_fields
+            .iter()
+            .zip(fields)
+            .all(|(validated, field)| {
+                if !validated && !field.is_nullable() {
+                    return false;
+                }
+                true
+            })
     }
 }
 

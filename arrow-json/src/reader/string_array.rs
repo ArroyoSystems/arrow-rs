@@ -133,15 +133,14 @@ impl<O: OffsetSizeTrait> ArrayDecoder for StringArrayDecoder<O> {
         match tape.get(pos) {
             TapeElement::String(_) => true,
             TapeElement::Null => self.is_nullable,
-            TapeElement::True | TapeElement::False | 
-            TapeElement::Number(_) |
-            TapeElement::I64(_) | TapeElement::I32(_) | 
-            TapeElement::F32(_) | TapeElement::F64(_) => {
-                self.coerce_primitive
-            }
-            _ => {
-                false
-            }
+            TapeElement::True
+            | TapeElement::False
+            | TapeElement::Number(_)
+            | TapeElement::I64(_)
+            | TapeElement::I32(_)
+            | TapeElement::F32(_)
+            | TapeElement::F64(_) => self.coerce_primitive,
+            _ => false,
         }
     }
 }

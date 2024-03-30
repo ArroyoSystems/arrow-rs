@@ -19,7 +19,7 @@ use std::marker::PhantomData;
 
 use arrow_array::builder::PrimitiveBuilder;
 use arrow_array::types::DecimalType;
-use arrow_array::{Array};
+use arrow_array::Array;
 use arrow_cast::parse::parse_decimal;
 use arrow_data::ArrayData;
 use arrow_schema::ArrowError;
@@ -81,8 +81,7 @@ where
             TapeElement::Null => self.is_nullable,
             TapeElement::String(idx) => {
                 let s = tape.get_string(idx);
-                parse_decimal::<D>(s, self.precision, self.scale)
-                    .is_ok()
+                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);

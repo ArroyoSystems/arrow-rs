@@ -169,18 +169,18 @@ impl ArrayDecoder for MapArrayDecoder {
             let Ok(value) = tape.next(key, "map key") else {
                 return false;
             };
-            
+
             if let Ok(i) = tape.next(value, "map value") {
                 cur_idx = i;
             } else {
                 return false;
-            } 
+            }
 
             if !(self.keys.validate_row(tape, key) && self.values.validate_row(tape, value)) {
                 return false;
             }
         }
-        
+
         true
     }
 }

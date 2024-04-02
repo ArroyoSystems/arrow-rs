@@ -153,4 +153,34 @@ impl ArrayDecoder for MapArrayDecoder {
         // Valid by construction
         Ok(unsafe { builder.build_unchecked() })
     }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        let end_idx = match tape.get(pos) {
+            TapeElement::StartObject(end_idx) => end_idx,
+            TapeElement::Null => {
+                return self.is_nullable;
+            }
+            _ => return false,
+        };
+
+        let mut cur_idx = pos + 1;
+        while cur_idx < end_idx {
+            let key = cur_idx;
+            let Ok(value) = tape.next(key, "map key") else {
+                return false;
+            };
+
+            if let Ok(i) = tape.next(value, "map value") {
+                cur_idx = i;
+            } else {
+                return false;
+            }
+
+            if !(self.keys.validate_row(tape, key) && self.values.validate_row(tape, value)) {
+                return false;
+            }
+        }
+
+        true
+    }
 }

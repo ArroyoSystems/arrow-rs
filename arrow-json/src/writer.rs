@@ -381,7 +381,7 @@ impl<'a> TimeFormatter<'a> {
             TimeFormatter::UnixMillisTimestampSeconds(a) => a.value(idx) as f64 * 1000.0,
         };
 
-        Value::Number(Number::from_f64(millis).unwrap_or(0.into()))
+        Value::Number(Number::from(millis as u64))
     }
 }
 
@@ -903,11 +903,9 @@ where
 
     /// Convert the `RecordBatch` into JSON rows, and write them to the output
     pub fn write(&mut self, batch: &RecordBatch) -> Result<(), ArrowError> {
-        for row in record_batches_to_json_rows_opts(
-            &[batch],
-            self.explicit_nulls,
-            self.timestamp_format,
-        )? {
+        for row in
+            record_batches_to_json_rows_opts(&[batch], self.explicit_nulls, self.timestamp_format)?
+        {
             self.write_row(&Value::Object(row))?;
         }
         Ok(())
@@ -915,11 +913,9 @@ where
 
     /// Convert the [`RecordBatch`] into JSON rows, and write them to the output
     pub fn write_batches(&mut self, batches: &[&RecordBatch]) -> Result<(), ArrowError> {
-        for row in record_batches_to_json_rows_opts(
-            batches,
-            self.explicit_nulls,
-            self.timestamp_format,
-        )? {
+        for row in
+            record_batches_to_json_rows_opts(batches, self.explicit_nulls, self.timestamp_format)?
+        {
             self.write_row(&Value::Object(row))?;
         }
         Ok(())
@@ -1186,7 +1182,7 @@ mod tests {
 
         assert_json_eq(
             &buf,
-            r#"{"micros":1542129070011.375,"millis":1542129070011.0,"name":"a","nanos":1542129070011.376,"secs":1542129070000.0}
+            r#"{"micros":1542129070011,"millis":1542129070011,"name":"a","nanos":1542129070011,"secs":1542129070000}
 {"name":"b"}
 "#,
         );
@@ -1339,7 +1335,7 @@ mod tests {
 
         assert_json_eq(
             &buf,
-            r#"{"date32":1542067200000.0,"date64":1542129070011.0,"name":"a"}
+            r#"{"date32":1542067200000,"date64":1542129070011,"name":"a"}
 {"name":"b"}
 "#,
         );

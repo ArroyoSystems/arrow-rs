@@ -20,7 +20,7 @@
 # Rust Object Store
 
 A focused, easy to use, idiomatic, high performance, `async` object
-store library interacting with object stores.
+store library for interacting with object stores.
 
 Using this crate, the same binary and code can easily run in multiple
 clouds and local test environments, via a simple runtime configuration
@@ -31,9 +31,10 @@ change. Supported object stores include:
 * [Google Cloud Storage](https://cloud.google.com/storage)
 * Local files
 * Memory
+* [HTTP/WebDAV Storage](https://datatracker.ietf.org/doc/html/rfc2518)
 * Custom implementations
 
-Originally developed for [InfluxDB IOx](https://github.com/influxdata/influxdb_iox/) and later split out and donated to [Apache Arrow](https://arrow.apache.org/).
+Originally developed by [InfluxData](https://www.influxdata.com/) and later donated to [Apache Arrow](https://arrow.apache.org/).
 
 See [docs.rs](https://docs.rs/object_store) for usage instructions
 

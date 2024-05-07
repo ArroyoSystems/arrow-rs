@@ -51,11 +51,11 @@
 //!
 //! 5. Small dependency footprint, depending on only a small number of common crates
 //!
-//! Originally developed for [InfluxDB IOx] and subsequently donated
+//! Originally developed by [InfluxData] and subsequently donated
 //! to [Apache Arrow].
 //!
 //! [Apache Arrow]: https://arrow.apache.org/
-//! [InfluxDB IOx]: https://github.com/influxdata/influxdb_iox/
+//! [InfluxData]: https://www.influxdata.com/
 //! [crates.io]: https://github.com/rust-lang/crates.io
 //! [ACID]: https://en.wikipedia.org/wiki/ACID
 //! [S3]: https://aws.amazon.com/s3/
@@ -550,6 +550,15 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// For some object stores (S3, GCS, and local in particular), if the
     /// writer fails or panics, you must call [ObjectStore::abort_multipart]
     /// to clean up partially written data.
+    ///
+    /// <div class="warning">
+    /// It is recommended applications wait for any in-flight requests to complete by calling `flush`, if
+    /// there may be a significant gap in time (> ~30s) before the next write.
+    /// These gaps can include times where the function returns control to the
+    /// caller while keeping the writer open. If `flush` is not called, futures
+    /// for in-flight requests may be left unpolled long enough for the requests
+    /// to time out, causing the write to fail.
+    /// </div>
     ///
     /// For applications requiring fine-grained control of multipart uploads
     /// see [`MultiPartStore`], although note that this interface cannot be
@@ -1684,7 +1693,9 @@ mod tests {
         }
 
         let options = GetOptions {
-            if_unmodified_since: Some(meta.last_modified + chrono::Duration::hours(10)),
+            if_unmodified_since: Some(
+                meta.last_modified + chrono::Duration::try_hours(10).unwrap(),
+            ),
             ..GetOptions::default()
         };
         match storage.get_opts(&path, options).await {
@@ -1693,7 +1704,9 @@ mod tests {
         }
 
         let options = GetOptions {
-            if_unmodified_since: Some(meta.last_modified - chrono::Duration::hours(10)),
+            if_unmodified_since: Some(
+                meta.last_modified - chrono::Duration::try_hours(10).unwrap(),
+            ),
             ..GetOptions::default()
         };
         match storage.get_opts(&path, options).await {
@@ -1711,7 +1724,7 @@ mod tests {
         }
 
         let options = GetOptions {
-            if_modified_since: Some(meta.last_modified - chrono::Duration::hours(10)),
+            if_modified_since: Some(meta.last_modified - chrono::Duration::try_hours(10).unwrap()),
             ..GetOptions::default()
         };
         match storage.get_opts(&path, options).await {
@@ -2191,6 +2204,21 @@ mod tests {
 
         let meta = storage.head(&path).await.unwrap();
         assert_eq!(meta.size, chunk_size * 2);
+
+        // Empty case
+        let path = Path::from("test_empty_multipart");
+
+        let id = multipart.create_multipart(&path).await.unwrap();
+
+        let parts = vec![];
+
+        multipart
+            .complete_multipart(&path, &id, parts)
+            .await
+            .unwrap();
+
+        let meta = storage.head(&path).await.unwrap();
+        assert_eq!(meta.size, 0);
     }
 
     #[cfg(any(feature = "azure", feature = "aws"))]

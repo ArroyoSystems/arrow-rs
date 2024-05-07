@@ -141,6 +141,9 @@ impl<T> ArrowReaderBuilder<T> {
     /// An example use case of this would be applying a selection determined by
     /// evaluating predicates against the [`Index`]
     ///
+    /// It is recommended to enable reading the page index if using this functionality, to allow
+    /// more efficient skipping over data pages. See [`ArrowReaderOptions::with_page_index`]
+    ///
     /// [`Index`]: crate::file::page_index::index::Index
     pub fn with_row_selection(self, selection: RowSelection) -> Self {
         Self {
@@ -152,6 +155,9 @@ impl<T> ArrowReaderBuilder<T> {
     /// Provide a [`RowFilter`] to skip decoding rows
     ///
     /// Row filters are applied after row group selection and row selection
+    ///
+    /// It is recommended to enable reading the page index if using this functionality, to allow
+    /// more efficient skipping over data pages. See [`ArrowReaderOptions::with_page_index`].
     pub fn with_row_filter(self, filter: RowFilter) -> Self {
         Self {
             filter: Some(filter),
@@ -163,6 +169,9 @@ impl<T> ArrowReaderBuilder<T> {
     ///
     /// The limit will be applied after any [`Self::with_row_selection`] and [`Self::with_row_filter`]
     /// allowing it to limit the final set of rows decoded after any pushed down predicates
+    ///
+    /// It is recommended to enable reading the page index if using this functionality, to allow
+    /// more efficient skipping over data pages. See [`ArrowReaderOptions::with_page_index`]
     pub fn with_limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -174,6 +183,9 @@ impl<T> ArrowReaderBuilder<T> {
     ///
     /// The offset will be applied after any [`Self::with_row_selection`] and [`Self::with_row_filter`]
     /// allowing it to skip rows after any pushed down predicates
+    ///
+    /// It is recommended to enable reading the page index if using this functionality, to allow
+    /// more efficient skipping over data pages. See [`ArrowReaderOptions::with_page_index`]
     pub fn with_offset(self, offset: usize) -> Self {
         Self {
             offset: Some(offset),
@@ -737,9 +749,10 @@ mod tests {
 
     use arrow_array::builder::*;
     use arrow_array::cast::AsArray;
-    use arrow_array::types::{Decimal128Type, Decimal256Type, DecimalType, Float16Type};
+    use arrow_array::types::{
+        Decimal128Type, Decimal256Type, DecimalType, Float16Type, Float32Type, Float64Type,
+    };
     use arrow_array::*;
-    use arrow_array::{RecordBatch, RecordBatchReader};
     use arrow_buffer::{i256, ArrowNativeType, Buffer};
     use arrow_data::ArrayDataBuilder;
     use arrow_schema::{DataType as ArrowDataType, Field, Fields, Schema};
@@ -755,7 +768,7 @@ mod tests {
     use crate::column::reader::decoder::REPETITION_LEVELS_BATCH_SIZE;
     use crate::data_type::{
         BoolType, ByteArray, ByteArrayType, DataType, FixedLenByteArray, FixedLenByteArrayType,
-        Int32Type, Int64Type, Int96Type,
+        FloatType, Int32Type, Int64Type, Int96Type,
     };
     use crate::errors::Result;
     use crate::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
@@ -860,6 +873,13 @@ mod tests {
                 Encoding::RLE_DICTIONARY,
                 Encoding::DELTA_BINARY_PACKED,
             ],
+        );
+        run_single_column_reader_tests::<FloatType, _, FloatType>(
+            2,
+            ConvertedType::NONE,
+            None,
+            |vals| Arc::new(Float32Array::from_iter(vals.iter().cloned())),
+            &[Encoding::PLAIN, Encoding::BYTE_STREAM_SPLIT],
         );
     }
 
@@ -1388,6 +1408,35 @@ mod tests {
         assert_eq!(col.value(1), f16::ZERO);
         assert!(col.value(1).is_sign_positive());
         assert!(col.value(2).is_nan());
+    }
+
+    #[test]
+    fn test_read_float32_float64_byte_stream_split() {
+        let path = format!(
+            "{}/byte_stream_split.zstd.parquet",
+            arrow::util::test_util::parquet_test_data(),
+        );
+        let file = File::open(path).unwrap();
+        let record_reader = ParquetRecordBatchReader::try_new(file, 128).unwrap();
+
+        let mut row_count = 0;
+        for batch in record_reader {
+            let batch = batch.unwrap();
+            row_count += batch.num_rows();
+            let f32_col = batch.column(0).as_primitive::<Float32Type>();
+            let f64_col = batch.column(1).as_primitive::<Float64Type>();
+
+            // This file contains floats from a standard normal distribution
+            for &x in f32_col.values() {
+                assert!(x > -10.0);
+                assert!(x < 10.0);
+            }
+            for &x in f64_col.values() {
+                assert!(x > -10.0);
+                assert!(x < 10.0);
+            }
+        }
+        assert_eq!(row_count, 300);
     }
 
     /// Parameters for single_column_reader_test
@@ -3044,7 +3093,7 @@ mod tests {
                     .unwrap();
 
                 let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-                let actual = concat_batches(&batch.schema(), &batches).unwrap();
+                let actual = concat_batches(batch.schema_ref(), &batches).unwrap();
                 assert_eq!(actual.num_rows(), selection.row_count());
 
                 let mut batch_offset = 0;

@@ -141,7 +141,6 @@ use chrono::Utc;
 use serde::Serialize;
 
 use arrow_array::timezone::Tz;
-use arrow_array::types::Float32Type;
 use arrow_array::types::*;
 use arrow_array::{
     downcast_integer, make_array, BooleanArray, RecordBatch, RecordBatchReader, StringArray,
@@ -832,20 +831,13 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::{BufReader, Cursor, Seek};
-    use std::sync::Arc;
 
     use arrow_array::cast::AsArray;
-    use arrow_array::types::Int32Type;
-    use arrow_array::{
-        make_array, Array, BooleanArray, Float64Array, ListArray, StringArray, StructArray,
-    };
+    use arrow_array::{Array, BooleanArray, Float64Array, ListArray, StringArray};
     use arrow_buffer::{ArrowNativeType, Buffer};
     use arrow_cast::display::{ArrayFormatter, FormatOptions};
     use arrow_data::ArrayDataBuilder;
-    use arrow_schema::{DataType, Field, FieldRef, Schema};
-
-    use crate::reader::infer_json_schema;
-    use crate::ReaderBuilder;
+    use arrow_schema::Field;
 
     use super::*;
 

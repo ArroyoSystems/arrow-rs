@@ -20,28 +20,6 @@
 //! This JSON writer converts Arrow [`RecordBatch`]es into arrays of
 //! JSON objects or JSON formatted byte streams.
 //!
-//! ## Writing JSON Objects
-//!
-//! To serialize [`RecordBatch`]es into array of
-//! [JSON](https://docs.serde.rs/serde_json/) objects, use
-//! [`record_batches_to_json_rows`]:
-//!
-//! ```
-//! # use std::sync::Arc;
-//! # use arrow_array::{Int32Array, RecordBatch};
-//! # use arrow_schema::{DataType, Field, Schema};
-//!
-//! let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
-//! let a = Int32Array::from(vec![1, 2, 3]);
-//! let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a)]).unwrap();
-//!
-//! let json_rows = arrow_json::writer::record_batches_to_json_rows(&[&batch]).unwrap();
-//! assert_eq!(
-//!     serde_json::Value::Object(json_rows[1].clone()),
-//!     serde_json::json!({"a": 2}),
-//! );
-//! ```
-//!
 //! ## Writing JSON formatted byte streams
 //!
 //! To serialize [`RecordBatch`]es into line-delimited JSON bytes, use
@@ -96,6 +74,37 @@
 //! [`LineDelimitedWriter`] and [`ArrayWriter`] will omit writing keys with null values.
 //! In order to explicitly write null values for keys, configure a custom [`Writer`] by
 //! using a [`WriterBuilder`] to construct a [`Writer`].
+//!
+//! ## Writing to [serde_json] JSON Objects
+//!
+//! To serialize [`RecordBatch`]es into an array of
+//! [JSON](https://docs.serde.rs/serde_json/) objects you can reparse the resulting JSON string.
+//! Note that this is less efficient than using the `Writer` API.
+//!
+//! ```
+//! # use std::sync::Arc;
+//! # use arrow_array::{Int32Array, RecordBatch};
+//! # use arrow_schema::{DataType, Field, Schema};
+//! let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
+//! let a = Int32Array::from(vec![1, 2, 3]);
+//! let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a)]).unwrap();
+//!
+//! // Write the record batch out as json bytes (string)
+//! let buf = Vec::new();
+//! let mut writer = arrow_json::ArrayWriter::new(buf);
+//! writer.write_batches(&vec![&batch]).unwrap();
+//! writer.finish().unwrap();
+//! let json_data = writer.into_inner();
+//!
+//! // Parse the string using serde_json
+//! use serde_json::{Map, Value};
+//! let json_rows: Vec<Map<String, Value>> = serde_json::from_reader(json_data.as_slice()).unwrap();
+//! assert_eq!(
+//!     serde_json::Value::Object(json_rows[1].clone()),
+//!     serde_json::json!({"a": 2}),
+//! );
+//! ```
+mod encoder;
 
 use std::collections::HashMap;
 use std::iter;
@@ -110,7 +119,9 @@ use arrow_array::types::*;
 use arrow_array::*;
 use arrow_schema::*;
 
+use crate::writer::encoder::{EncoderOptions};
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
+use encoder::make_encoder;
 
 fn primitive_array_to_json<T>(array: &dyn Array) -> Result<Vec<Value>, ArrowError>
 where
@@ -159,6 +170,7 @@ fn struct_array_to_jsonmap_array(
 }
 
 /// Converts an arrow [`Array`] into a `Vec` of Serde JSON [`serde_json::Value`]'s
+#[deprecated(note = "Use Writer")]
 pub fn array_to_json_array(array: &dyn Array) -> Result<Vec<Value>, ArrowError> {
     // For backwards compatibility, default to skip nulls
     array_to_json_array_internal(array, false, TimestampFormat::default())
@@ -359,10 +371,10 @@ impl<'a> TimeFormatter<'a> {
                     Self::UnixMillisDate64(array.as_any().downcast_ref::<Date64Array>().unwrap())
                 }
                 _ => {
-                    unreachable!(
+                    return Err(ArrowError::InvalidArgumentError(format!(
                         "cannot have time format field with type {}",
                         array.data_type()
-                    )
+                    )));
                 }
             }),
         }
@@ -384,6 +396,7 @@ impl<'a> TimeFormatter<'a> {
         Value::Number(Number::from(millis as u64))
     }
 }
+
 
 fn set_column_for_json_rows(
     rows: &mut [Option<JsonMap<String, Value>>],
@@ -606,6 +619,7 @@ fn set_column_for_json_rows(
 
 /// Converts an arrow [`RecordBatch`] into a `Vec` of Serde JSON
 /// [`JsonMap`]s (objects)
+#[deprecated(note = "Use Writer")]
 pub fn record_batches_to_json_rows(
     batches: &[&RecordBatch],
 ) -> Result<Vec<JsonMap<String, Value>>, ArrowError> {
@@ -652,6 +666,30 @@ pub fn record_batches_to_json_rows_opts(
 
     let rows = rows.into_iter().map(|a| a.unwrap()).collect::<Vec<_>>();
     Ok(rows)
+}
+
+/// Writes a record batch as a Vec of encoded JSON rows
+pub fn record_batch_to_vec(
+    batch: &RecordBatch,
+    explicit_nulls: bool,
+    timestamp_format: TimestampFormat,
+) -> Result<Vec<Vec<u8>>, ArrowError> {
+    let array  = StructArray::from(batch.clone());
+    let mut encoder = make_encoder(&array, &HashMap::new(), &EncoderOptions {
+        explicit_nulls,
+        timestamp_format,
+    })?;
+    
+    let mut results = Vec::with_capacity(batch.num_rows());
+    for idx in 0..array.len() {
+        let mut buffer = Vec::with_capacity(8);
+        encoder.encode(idx, &mut buffer);
+        if !buffer.is_empty() {
+            results.push(buffer);
+        }
+    }
+    
+    Ok(results)
 }
 
 /// This trait defines how to format a sequence of JSON objects to a
@@ -747,13 +785,7 @@ pub enum TimestampFormat {
 
 /// JSON writer builder.
 #[derive(Debug, Clone, Default)]
-pub struct WriterBuilder {
-    /// Controls whether null values should be written explicitly for keys
-    /// in objects, or whether the key should be omitted entirely.
-    explicit_nulls: bool,
-    /// Sets the timestamp serialization format
-    timestamp_format: TimestampFormat,
-}
+pub struct WriterBuilder(EncoderOptions);
 
 impl WriterBuilder {
     /// Create a new builder for configuring JSON writing options.
@@ -781,7 +813,7 @@ impl WriterBuilder {
 
     /// Returns `true` if this writer is configured to keep keys with null values.
     pub fn explicit_nulls(&self) -> bool {
-        self.explicit_nulls
+        self.0.explicit_nulls
     }
 
     /// Set whether to keep keys with null values, or to omit writing them.
@@ -806,13 +838,13 @@ impl WriterBuilder {
     ///
     /// Default is to skip nulls (set to `false`).
     pub fn with_explicit_nulls(mut self, explicit_nulls: bool) -> Self {
-        self.explicit_nulls = explicit_nulls;
+        self.0.explicit_nulls = explicit_nulls;
         self
     }
 
     /// Sets the timestamp format, controlling how timestamps are serialized in JSON
     pub fn with_timestamp_format(mut self, timestamp_format: TimestampFormat) -> Self {
-        self.timestamp_format = timestamp_format;
+        self.0.timestamp_format = timestamp_format;
         self
     }
 
@@ -827,8 +859,7 @@ impl WriterBuilder {
             started: false,
             finished: false,
             format: F::default(),
-            explicit_nulls: self.explicit_nulls,
-            timestamp_format: self.timestamp_format,
+            options: self.0,
         }
     }
 }
@@ -861,11 +892,8 @@ where
     /// Determines how the byte stream is formatted
     format: F,
 
-    /// Whether keys with null values should be written or skipped
-    explicit_nulls: bool,
-
-    // How timestamps should be serialized
-    timestamp_format: TimestampFormat,
+    /// Controls how JSON should be encoded, e.g. whether to write explicit nulls or skip them
+    options: EncoderOptions,
 }
 
 impl<W, F> Writer<W, F>
@@ -880,12 +908,12 @@ where
             started: false,
             finished: false,
             format: F::default(),
-            explicit_nulls: false,
-            timestamp_format: TimestampFormat::default(),
+            options: EncoderOptions::default(),
         }
     }
 
     /// Write a single JSON row to the output writer
+    #[deprecated(note = "Use Writer::write")]
     pub fn write_row(&mut self, row: &Value) -> Result<(), ArrowError> {
         let is_first_row = !self.started;
         if !self.started {
@@ -901,22 +929,48 @@ where
         Ok(())
     }
 
-    /// Convert the `RecordBatch` into JSON rows, and write them to the output
+    /// Serialize `batch` to JSON output
     pub fn write(&mut self, batch: &RecordBatch) -> Result<(), ArrowError> {
-        for row in
-            record_batches_to_json_rows_opts(&[batch], self.explicit_nulls, self.timestamp_format)?
-        {
-            self.write_row(&Value::Object(row))?;
+        if batch.num_rows() == 0 {
+            return Ok(());
         }
+
+        // BufWriter uses a buffer size of 8KB
+        // We therefore double this and flush once we have more than 8KB
+        let mut buffer = Vec::with_capacity(16 * 1024);
+
+        let mut is_first_row = !self.started;
+        if !self.started {
+            self.format.start_stream(&mut buffer)?;
+            self.started = true;
+        }
+
+        let array = StructArray::from(batch.clone());
+        let mut encoder = make_encoder(&array, &HashMap::new(), &self.options)?;
+
+        for idx in 0..batch.num_rows() {
+            self.format.start_row(&mut buffer, is_first_row)?;
+            is_first_row = false;
+
+            encoder.encode(idx, &mut buffer);
+            if buffer.len() > 8 * 1024 {
+                self.writer.write_all(&buffer)?;
+                buffer.clear();
+            }
+            self.format.end_row(&mut buffer)?;
+        }
+
+        if !buffer.is_empty() {
+            self.writer.write_all(&buffer)?;
+        }
+
         Ok(())
     }
 
-    /// Convert the [`RecordBatch`] into JSON rows, and write them to the output
+    /// Serialize `batches` to JSON output
     pub fn write_batches(&mut self, batches: &[&RecordBatch]) -> Result<(), ArrowError> {
-        for row in
-            record_batches_to_json_rows_opts(batches, self.explicit_nulls, self.timestamp_format)?
-        {
-            self.write_row(&Value::Object(row))?;
+        for b in batches {
+            self.write(b)?;
         }
         Ok(())
     }
@@ -961,7 +1015,7 @@ mod tests {
     use serde_json::json;
 
     use arrow_array::builder::{Int32Builder, Int64Builder, MapBuilder, StringBuilder};
-    use arrow_buffer::{Buffer, ToByteSlice};
+    use arrow_buffer::{Buffer, NullBuffer, OffsetBuffer, ToByteSlice};
     use arrow_data::ArrayData;
 
     use crate::reader::*;
@@ -1042,6 +1096,39 @@ mod tests {
     }
 
     #[test]
+    fn write_raw_json() {
+        let mut metadata = HashMap::new();
+        metadata.insert("ARROW:extension:name".to_string(), "arroyo.json".to_string());
+        let schema = Schema::new(vec![
+            Field::new("c1", DataType::Utf8, true),
+            Field::new("c2", DataType::Utf8, true)
+                .with_metadata(metadata),
+        ]);
+
+        let a = StringArray::from(vec![Some("a"), None, Some("c"), Some("d"), None]);
+        let b = StringArray::from(vec![Some("true"), Some("10"), None, Some(r#"{"a": [1, 2, 3]}"#), None]);
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a), Arc::new(b)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"c1":"a","c2":true}
+{"c2":10}
+{"c1":"c"}
+{"c1":"d","c2":{"a":[1,2,3]}}
+{}
+"#,
+        );
+    }
+    
+
+    #[test]
     fn write_dictionary() {
         let schema = Schema::new(vec![
             Field::new_dictionary("c1", DataType::Int32, DataType::Utf8, true),
@@ -1082,11 +1169,99 @@ mod tests {
     }
 
     #[test]
+    fn write_list_of_dictionary() {
+        let dict_field = Arc::new(Field::new_dictionary(
+            "item",
+            DataType::Int32,
+            DataType::Utf8,
+            true,
+        ));
+        let schema = Schema::new(vec![Field::new_large_list("l", dict_field.clone(), true)]);
+
+        let dict_array: DictionaryArray<Int32Type> =
+            vec![Some("a"), Some("b"), Some("c"), Some("a"), None, Some("c")]
+                .into_iter()
+                .collect();
+        let list_array = LargeListArray::try_new(
+            dict_field,
+            OffsetBuffer::from_lengths([3_usize, 2, 0, 1]),
+            Arc::new(dict_array),
+            Some(NullBuffer::from_iter([true, true, false, true])),
+        )
+        .unwrap();
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(list_array)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"l":["a","b","c"]}
+{"l":["a",null]}
+{}
+{"l":["c"]}
+"#,
+        );
+    }
+
+    #[test]
+    fn write_list_of_dictionary_large_values() {
+        let dict_field = Arc::new(Field::new_dictionary(
+            "item",
+            DataType::Int32,
+            DataType::LargeUtf8,
+            true,
+        ));
+        let schema = Schema::new(vec![Field::new_large_list("l", dict_field.clone(), true)]);
+
+        let keys = PrimitiveArray::<Int32Type>::from(vec![
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(0),
+            None,
+            Some(2),
+        ]);
+        let values = LargeStringArray::from(vec!["a", "b", "c"]);
+        let dict_array = DictionaryArray::try_new(keys, Arc::new(values)).unwrap();
+
+        let list_array = LargeListArray::try_new(
+            dict_field,
+            OffsetBuffer::from_lengths([3_usize, 2, 0, 1]),
+            Arc::new(dict_array),
+            Some(NullBuffer::from_iter([true, true, false, true])),
+        )
+        .unwrap();
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(list_array)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"l":["a","b","c"]}
+{"l":["a",null]}
+{}
+{"l":["c"]}
+"#,
+        );
+    }
+
+    #[test]
     fn write_timestamps() {
         let ts_string = "2018-11-13T17:11:10.011375885995";
         let ts_nanos = ts_string
             .parse::<chrono::NaiveDateTime>()
             .unwrap()
+            .and_utc()
             .timestamp_nanos_opt()
             .unwrap();
         let ts_micros = ts_nanos / 1000;
@@ -1140,6 +1315,7 @@ mod tests {
         let ts_nanos = ts_string
             .parse::<chrono::NaiveDateTime>()
             .unwrap()
+            .and_utc()
             .timestamp_nanos_opt()
             .unwrap();
         let ts_micros = ts_nanos / 1000;
@@ -1176,7 +1352,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut writer = LineDelimitedWriter::new(&mut buf);
-            writer.timestamp_format = TimestampFormat::UnixMillis;
+            writer.options.timestamp_format = TimestampFormat::UnixMillis;
             writer.write_batches(&[&batch]).unwrap();
         }
 
@@ -1194,6 +1370,7 @@ mod tests {
         let ts_nanos = ts_string
             .parse::<chrono::NaiveDateTime>()
             .unwrap()
+            .and_utc()
             .timestamp_nanos_opt()
             .unwrap();
         let ts_micros = ts_nanos / 1000;
@@ -1254,6 +1431,7 @@ mod tests {
         let ts_millis = ts_string
             .parse::<chrono::NaiveDateTime>()
             .unwrap()
+            .and_utc()
             .timestamp_millis();
 
         let arr_date32 = Date32Array::from(vec![
@@ -1300,6 +1478,7 @@ mod tests {
         let ts_millis = ts_string
             .parse::<chrono::NaiveDateTime>()
             .unwrap()
+            .and_utc()
             .timestamp_millis();
 
         let arr_date32 = Date32Array::from(vec![
@@ -1329,7 +1508,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut writer = LineDelimitedWriter::new(&mut buf);
-            writer.timestamp_format = TimestampFormat::UnixMillis;
+            writer.options.timestamp_format = TimestampFormat::UnixMillis;
             writer.write_batches(&[&batch]).unwrap();
         }
 
@@ -1421,7 +1600,7 @@ mod tests {
 
         assert_json_eq(
             &buf,
-            r#"{"duration_sec":"PT120S","duration_msec":"PT0.120S","duration_usec":"PT0.000120S","duration_nsec":"PT0.000000120S","name":"a"}
+            r#"{"duration_sec":"PT120S","duration_msec":"PT0.12S","duration_usec":"PT0.00012S","duration_nsec":"PT0.00000012S","name":"a"}
 {"name":"b"}
 "#,
         );
@@ -1481,7 +1660,7 @@ mod tests {
 "#,
         );
     }
-
+    
     #[test]
     fn write_struct_with_list_field() {
         let field_c1 = Field::new(
@@ -1721,6 +1900,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn json_writer_one_row() {
         let mut writer = ArrayWriter::new(vec![] as Vec<u8>);
         let v = json!({ "an": "object" });
@@ -1733,6 +1913,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn json_writer_two_rows() {
         let mut writer = ArrayWriter::new(vec![] as Vec<u8>);
         let v = json!({ "an": "object" });
@@ -1832,9 +2013,9 @@ mod tests {
             r#"{"a":{"list":[1,2]},"b":{"list":[1,2]}}
 {"a":{"list":[null]},"b":{"list":[null]}}
 {"a":{"list":[]},"b":{"list":[]}}
-{"a":null,"b":{"list":[3,null]}}
+{"b":{"list":[3,null]}}
 {"a":{"list":[4,5]},"b":{"list":[4,5]}}
-{"a":null,"b":{}}
+{"b":{}}
 {"a":{},"b":{}}
 "#,
         );
@@ -1889,7 +2070,7 @@ mod tests {
         assert_json_eq(
             &buf,
             r#"{"map":{"foo":10}}
-{"map":null}
+{}
 {"map":{}}
 {"map":{"bar":20,"baz":30,"qux":40}}
 {"map":{"quux":50}}
@@ -1974,6 +2155,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_array_to_json_array_for_fixed_size_list_array() {
         let expected_json = vec![
             json!([0, 1, 2]),
@@ -1996,6 +2178,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_array_to_json_array_for_map_array() {
         let expected_json = serde_json::from_value::<Vec<Value>>(json!([
             [

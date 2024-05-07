@@ -193,9 +193,9 @@ impl FlightSqlService for FlightSqlServiceImpl {
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         self.check_token(&request)?;
         let batch = Self::fake_result().map_err(|e| status!("Could not fake a result", e))?;
-        let schema = batch.schema();
-        let batches = vec![batch];
-        let flight_data = batches_to_flight_data(schema.as_ref(), batches)
+        let schema = batch.schema_ref();
+        let batches = vec![batch.clone()];
+        let flight_data = batches_to_flight_data(schema, batches)
             .map_err(|e| status!("Could not convert batches", e))?
             .into_iter()
             .map(Ok);
@@ -249,6 +249,8 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let endpoint = FlightEndpoint {
             ticket: Some(ticket),
             location: vec![loc],
+            expiration_time: None,
+            app_metadata: vec![].into(),
         };
         let info = FlightInfo::new()
             .try_with_schema(&schema)
@@ -639,10 +641,10 @@ impl FlightSqlService for FlightSqlServiceImpl {
         request: Request<Action>,
     ) -> Result<ActionCreatePreparedStatementResult, Status> {
         self.check_token(&request)?;
-        let schema = Self::fake_result()
-            .map_err(|e| status!("Error getting result schema", e))?
-            .schema();
-        let message = SchemaAsIpc::new(&schema, &IpcWriteOptions::default())
+        let record_batch =
+            Self::fake_result().map_err(|e| status!("Error getting result schema", e))?;
+        let schema = record_batch.schema_ref();
+        let message = SchemaAsIpc::new(schema, &IpcWriteOptions::default())
             .try_into()
             .map_err(|e| status!("Unable to serialize schema", e))?;
         let IpcMessage(schema_bytes) = message;

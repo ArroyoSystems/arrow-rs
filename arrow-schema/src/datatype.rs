@@ -145,10 +145,31 @@ pub enum DataType {
     /// ```
     Timestamp(TimeUnit, Option<Arc<str>>),
     /// A signed 32-bit date representing the elapsed time since UNIX epoch (1970-01-01)
-    /// in days (32 bits).
+    /// in days.
     Date32,
     /// A signed 64-bit date representing the elapsed time since UNIX epoch (1970-01-01)
-    /// in milliseconds (64 bits). Values are evenly divisible by 86400000.
+    /// in milliseconds.
+    ///
+    /// According to the specification (see [Schema.fbs]), this should be treated as the number of
+    /// days, in milliseconds, since the UNIX epoch. Therefore, values must be evenly divisible by
+    /// `86_400_000` (the number of milliseconds in a standard day).
+    ///
+    /// The reason for this is for compatibility with other language's native libraries,
+    /// such as Java, which historically lacked a dedicated date type
+    /// and only supported timestamps.
+    ///
+    /// Practically, validation that values of this type are evenly divisible by `86_400_000` is not enforced
+    /// by this library for performance and usability reasons. Date64 values will be treated similarly to the
+    /// `Timestamp(TimeUnit::Millisecond, None)` type, in that its values will be printed showing the time of
+    /// day if the value does not represent an exact day, and arithmetic can be done at the millisecond
+    /// granularity to change the time represented.
+    ///
+    /// Users should prefer using Date32 to cleanly represent the number of days, or one of the Timestamp
+    /// variants to include time as part of the representation, depending on their use case.
+    ///
+    /// For more details, see [#5288](https://github.com/apache/arrow-rs/issues/5288).
+    ///
+    /// [Schema.fbs]: https://github.com/apache/arrow/blob/main/format/Schema.fbs
     Date64,
     /// A signed 32-bit time representing the elapsed time since midnight in the unit of `TimeUnit`.
     /// Must be either seconds or milliseconds.
@@ -175,6 +196,15 @@ pub enum DataType {
     /// A single LargeBinary array can store up to [`i64::MAX`] bytes
     /// of binary data in total.
     LargeBinary,
+    /// (NOT YET FULLY SUPPORTED) Opaque binary data of variable length.
+    ///
+    /// Note this data type is not yet fully supported. Using it with arrow APIs may result in `panic`s.
+    ///
+    /// Logically the same as [`Self::Binary`], but the internal representation uses a view
+    /// struct that contains the string length and either the string's entire data
+    /// inline (for small strings) or an inlined prefix, an index of another buffer,
+    /// and an offset pointing to a slice in that buffer (for non-small strings).
+    BinaryView,
     /// A variable-length string in Unicode with UTF-8 encoding.
     ///
     /// A single Utf8 array can store up to [`i32::MAX`] bytes
@@ -185,16 +215,43 @@ pub enum DataType {
     /// A single LargeUtf8 array can store up to [`i64::MAX`] bytes
     /// of string data in total.
     LargeUtf8,
+    /// (NOT YET FULLY SUPPORTED)  A variable-length string in Unicode with UTF-8 encoding
+    ///
+    /// Note this data type is not yet fully supported. Using it with arrow APIs may result in `panic`s.
+    ///
+    /// Logically the same as [`Self::Utf8`], but the internal representation uses a view
+    /// struct that contains the string length and either the string's entire data
+    /// inline (for small strings) or an inlined prefix, an index of another buffer,
+    /// and an offset pointing to a slice in that buffer (for non-small strings).
+    Utf8View,
     /// A list of some logical data type with variable length.
     ///
     /// A single List array can store up to [`i32::MAX`] elements in total.
     List(FieldRef),
+
+    /// (NOT YET FULLY SUPPORTED)  A list of some logical data type with variable length.
+    ///
+    /// Note this data type is not yet fully supported. Using it with arrow APIs may result in `panic`s.
+    ///
+    /// The ListView layout is defined by three buffers:
+    /// a validity bitmap, an offsets buffer, and an additional sizes buffer.
+    /// Sizes and offsets are both 32 bits for this type
+    ListView(FieldRef),
     /// A list of some logical data type with fixed length.
     FixedSizeList(FieldRef, i32),
     /// A list of some logical data type with variable length and 64-bit offsets.
     ///
     /// A single LargeList array can store up to [`i64::MAX`] elements in total.
     LargeList(FieldRef),
+
+    /// (NOT YET FULLY SUPPORTED)  A list of some logical data type with variable length and 64-bit offsets.
+    ///
+    /// Note this data type is not yet fully supported. Using it with arrow APIs may result in `panic`s.
+    ///
+    /// The LargeListView layout is defined by three buffers:
+    /// a validity bitmap, an offsets buffer, and an additional sizes buffer.
+    /// Sizes and offsets are both 64 bits for this type
+    LargeListView(FieldRef),
     /// A nested datatype that contains a number of sub-fields.
     Struct(Fields),
     /// A nested datatype that can represent slots of differing types. Components:
@@ -494,10 +551,14 @@ impl DataType {
             DataType::Interval(IntervalUnit::MonthDayNano) => Some(16),
             DataType::Decimal128(_, _) => Some(16),
             DataType::Decimal256(_, _) => Some(32),
-            DataType::Utf8 | DataType::LargeUtf8 => None,
-            DataType::Binary | DataType::LargeBinary => None,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => None,
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => None,
             DataType::FixedSizeBinary(_) => None,
-            DataType::List(_) | DataType::LargeList(_) | DataType::Map(_, _) => None,
+            DataType::List(_)
+            | DataType::ListView(_)
+            | DataType::LargeList(_)
+            | DataType::LargeListView(_)
+            | DataType::Map(_, _) => None,
             DataType::FixedSizeList(_, _) => None,
             DataType::Struct(_) => None,
             DataType::Union(_, _) => None,
@@ -534,14 +595,18 @@ impl DataType {
                 | DataType::Binary
                 | DataType::FixedSizeBinary(_)
                 | DataType::LargeBinary
+                | DataType::BinaryView
                 | DataType::Utf8
                 | DataType::LargeUtf8
+                | DataType::Utf8View
                 | DataType::Decimal128(_, _)
                 | DataType::Decimal256(_, _) => 0,
                 DataType::Timestamp(_, s) => s.as_ref().map(|s| s.len()).unwrap_or_default(),
                 DataType::List(field)
+                | DataType::ListView(field)
                 | DataType::FixedSizeList(field, _)
                 | DataType::LargeList(field)
+                | DataType::LargeListView(field)
                 | DataType::Map(field, _) => field.size(),
                 DataType::Struct(fields) => fields.size(),
                 DataType::Union(fields, _) => fields.size(),
@@ -587,6 +652,24 @@ impl DataType {
     pub fn new_list(data_type: DataType, nullable: bool) -> Self {
         DataType::List(Arc::new(Field::new_list_field(data_type, nullable)))
     }
+
+    /// Create a [`DataType::LargeList`] with elements of the specified type
+    /// and nullability, and conventionally named inner [`Field`] (`"item"`).
+    ///
+    /// To specify field level metadata, construct the inner [`Field`]
+    /// directly via [`Field::new`] or [`Field::new_list_field`].
+    pub fn new_large_list(data_type: DataType, nullable: bool) -> Self {
+        DataType::LargeList(Arc::new(Field::new_list_field(data_type, nullable)))
+    }
+
+    /// Create a [`DataType::FixedSizeList`] with elements of the specified type, size
+    /// and nullability, and conventionally named inner [`Field`] (`"item"`).
+    ///
+    /// To specify field level metadata, construct the inner [`Field`]
+    /// directly via [`Field::new`] or [`Field::new_list_field`].
+    pub fn new_fixed_size_list(data_type: DataType, size: i32, nullable: bool) -> Self {
+        DataType::FixedSizeList(Arc::new(Field::new_list_field(data_type, nullable)), size)
+    }
 }
 
 /// The maximum precision for [DataType::Decimal128] values
@@ -608,7 +691,6 @@ pub const DECIMAL_DEFAULT_SCALE: i8 = 10;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Field, UnionMode};
 
     #[test]
     #[cfg(feature = "serde")]

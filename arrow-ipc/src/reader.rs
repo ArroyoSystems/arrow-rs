@@ -790,6 +790,12 @@ impl FileReaderBuilder {
         let total_blocks = blocks.len();
 
         let ipc_schema = footer.schema().unwrap();
+        if !ipc_schema.endianness().equals_to_target_endianness() {
+            return Err(ArrowError::IpcError(
+                "the endianness of the source system does not match the endianness of the target system.".to_owned()
+            ));
+        }
+
         let schema = crate::convert::fb_to_schema(ipc_schema);
 
         let mut custom_metadata = HashMap::new();
@@ -1184,7 +1190,6 @@ mod tests {
     use crate::root_as_message;
     use arrow_array::builder::{PrimitiveRunBuilder, UnionBuilder};
     use arrow_array::types::*;
-    use arrow_buffer::ArrowNativeType;
     use arrow_data::ArrayDataBuilder;
 
     fn create_test_projection_schema() -> Schema {
@@ -1423,7 +1428,7 @@ mod tests {
 
     fn roundtrip_ipc(rb: &RecordBatch) -> RecordBatch {
         let mut buf = Vec::new();
-        let mut writer = crate::writer::FileWriter::try_new(&mut buf, &rb.schema()).unwrap();
+        let mut writer = crate::writer::FileWriter::try_new(&mut buf, rb.schema_ref()).unwrap();
         writer.write(rb).unwrap();
         writer.finish().unwrap();
         drop(writer);
@@ -1434,7 +1439,7 @@ mod tests {
 
     fn roundtrip_ipc_stream(rb: &RecordBatch) -> RecordBatch {
         let mut buf = Vec::new();
-        let mut writer = crate::writer::StreamWriter::try_new(&mut buf, &rb.schema()).unwrap();
+        let mut writer = crate::writer::StreamWriter::try_new(&mut buf, rb.schema_ref()).unwrap();
         writer.write(rb).unwrap();
         writer.finish().unwrap();
         drop(writer);
@@ -1809,7 +1814,7 @@ mod tests {
         let batch = RecordBatch::new_empty(schema);
 
         let mut buf = Vec::new();
-        let mut writer = crate::writer::FileWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        let mut writer = crate::writer::FileWriter::try_new(&mut buf, batch.schema_ref()).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         drop(writer);
@@ -1836,7 +1841,7 @@ mod tests {
         let batch = RecordBatch::new_empty(schema);
 
         let mut buf = Vec::new();
-        let mut writer = crate::writer::FileWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        let mut writer = crate::writer::FileWriter::try_new(&mut buf, batch.schema_ref()).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         drop(writer);

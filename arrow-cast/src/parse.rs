@@ -17,7 +17,7 @@
 
 use arrow_array::timezone::Tz;
 use arrow_array::types::*;
-use arrow_array::{ArrowNativeTypeOp, ArrowPrimitiveType};
+use arrow_array::ArrowNativeTypeOp;
 use arrow_buffer::ArrowNativeType;
 use arrow_schema::ArrowError;
 use chrono::prelude::*;
@@ -273,7 +273,8 @@ pub fn string_to_timestamp_nanos(s: &str) -> Result<i64, ArrowError> {
 /// Fallible conversion of [`NaiveDateTime`] to `i64` nanoseconds
 #[inline]
 fn to_timestamp_nanos(dt: NaiveDateTime) -> Result<i64, ArrowError> {
-    dt.timestamp_nanos_opt()
+    dt.and_utc()
+        .timestamp_nanos_opt()
         .ok_or_else(|| ArrowError::ParseError(ERR_NANOSECONDS_NOT_SUPPORTED.to_string()))
 }
 
@@ -438,7 +439,15 @@ macro_rules! parser_primitive {
     ($t:ty) => {
         impl Parser for $t {
             fn parse(string: &str) -> Option<Self::Native> {
-                lexical_core::parse::<Self::Native>(string.as_bytes()).ok()
+                if !string.as_bytes().last().is_some_and(|x| x.is_ascii_digit()) {
+                    return None;
+                }
+                match atoi::FromRadix10SignedChecked::from_radix_10_signed_checked(
+                    string.as_bytes(),
+                ) {
+                    (Some(n), x) if x == string.len() => Some(n),
+                    _ => None,
+                }
             }
         }
     };
@@ -546,8 +555,11 @@ const ERR_NANOSECONDS_NOT_SUPPORTED: &str = "The dates that can be represented a
 
 fn parse_date(string: &str) -> Option<NaiveDate> {
     if string.len() > 10 {
-        return None;
-    }
+        // Try to parse as datetime and return just the date part
+        return string_to_datetime(&Utc, string)
+            .map(|dt| dt.date_naive())
+            .ok();
+    };
     let mut digits = [0; 10];
     let mut mask = 0;
 
@@ -624,8 +636,8 @@ impl Parser for Date32Type {
 impl Parser for Date64Type {
     fn parse(string: &str) -> Option<i64> {
         if string.len() <= 10 {
-            let date = parse_date(string)?;
-            Some(NaiveDateTime::new(date, NaiveTime::default()).timestamp_millis())
+            let datetime = NaiveDateTime::new(parse_date(string)?, NaiveTime::default());
+            Some(datetime.and_utc().timestamp_millis())
         } else {
             let date_time = string_to_datetime(&Utc, string).ok()?;
             Some(date_time.timestamp_millis())
@@ -654,7 +666,7 @@ impl Parser for Date64Type {
             Some(date_time.timestamp_millis())
         } else {
             let date_time = NaiveDateTime::parse_from_str(string, format).ok()?;
-            Some(date_time.timestamp_millis())
+            Some(date_time.and_utc().timestamp_millis())
         }
     }
 }
@@ -1213,7 +1225,6 @@ fn parse_interval_components(
 mod tests {
     use super::*;
     use arrow_array::temporal_conversions::date32_to_datetime;
-    use arrow_array::timezone::Tz;
     use arrow_buffer::i256;
 
     #[test]
@@ -1278,43 +1289,45 @@ mod tests {
 
         // Ensure both T and ' ' variants work
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08T13:42:29.190855").unwrap()
         );
 
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08 13:42:29.190855").unwrap()
         );
 
         // Also ensure that parsing timestamps with no fractional
         // second part works as well
-        let naive_datetime_whole_secs = NaiveDateTime::new(
+        let datetime_whole_secs = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2020, 9, 8).unwrap(),
             NaiveTime::from_hms_opt(13, 42, 29).unwrap(),
-        );
+        )
+        .and_utc();
 
         // Ensure both T and ' ' variants work
         assert_eq!(
-            naive_datetime_whole_secs.timestamp_nanos_opt().unwrap(),
+            datetime_whole_secs.timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08T13:42:29").unwrap()
         );
 
         assert_eq!(
-            naive_datetime_whole_secs.timestamp_nanos_opt().unwrap(),
+            datetime_whole_secs.timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08 13:42:29").unwrap()
         );
 
         // ensure without time work
         // no time, should be the nano second at
         // 2020-09-08 0:0:0
-        let naive_datetime_no_time = NaiveDateTime::new(
+        let datetime_no_time = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2020, 9, 8).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-        );
+        )
+        .and_utc();
 
         assert_eq!(
-            naive_datetime_no_time.timestamp_nanos_opt().unwrap(),
+            datetime_no_time.timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08").unwrap()
         )
     }
@@ -1426,12 +1439,12 @@ mod tests {
 
         // Ensure both T and ' ' variants work
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08T13:42:29.190855").unwrap()
         );
 
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08 13:42:29.190855").unwrap()
         );
 
@@ -1442,12 +1455,12 @@ mod tests {
 
         // Ensure both T and ' ' variants work
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08T13:42:29").unwrap()
         );
 
         assert_eq!(
-            naive_datetime.timestamp_nanos_opt().unwrap(),
+            naive_datetime.and_utc().timestamp_nanos_opt().unwrap(),
             parse_timestamp("2020-09-08 13:42:29").unwrap()
         );
 
@@ -1488,10 +1501,13 @@ mod tests {
             "2020-9-08",
             "2020-12-1",
             "1690-2-5",
+            "2020-09-08 01:02:03",
         ];
         for case in cases {
             let v = date32_to_datetime(Date32Type::parse(case).unwrap()).unwrap();
-            let expected: NaiveDate = case.parse().unwrap();
+            let expected = NaiveDate::parse_from_str(case, "%Y-%m-%d")
+                .or(NaiveDate::parse_from_str(case, "%Y-%m-%d %H:%M:%S"))
+                .unwrap();
             assert_eq!(v.date(), expected);
         }
 
@@ -1503,6 +1519,11 @@ mod tests {
             "2020-09-08-03",
             "2020--04-03",
             "2020--",
+            "2020-09-08 01",
+            "2020-09-08 01:02",
+            "2020-09-08 01-02-03",
+            "2020-9-8 01:02:03",
+            "2020-09-08 1:2:3",
         ];
         for case in err_cases {
             assert_eq!(Date32Type::parse(case), None);
@@ -2284,5 +2305,23 @@ mod tests {
             let result = parse_decimal::<Decimal256Type>(s, 76, scale);
             assert_eq!(i, result.unwrap());
         }
+    }
+
+    #[test]
+    fn test_parse_empty() {
+        assert_eq!(Int32Type::parse(""), None);
+        assert_eq!(Int64Type::parse(""), None);
+        assert_eq!(UInt32Type::parse(""), None);
+        assert_eq!(UInt64Type::parse(""), None);
+        assert_eq!(Float32Type::parse(""), None);
+        assert_eq!(Float64Type::parse(""), None);
+        assert_eq!(Int32Type::parse("+"), None);
+        assert_eq!(Int64Type::parse("+"), None);
+        assert_eq!(UInt32Type::parse("+"), None);
+        assert_eq!(UInt64Type::parse("+"), None);
+        assert_eq!(Float32Type::parse("+"), None);
+        assert_eq!(Float64Type::parse("+"), None);
+        assert_eq!(TimestampNanosecondType::parse(""), None);
+        assert_eq!(Date32Type::parse(""), None);
     }
 }

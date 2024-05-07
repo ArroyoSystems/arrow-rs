@@ -543,6 +543,7 @@ pub(crate) fn get_fb_field_type<'a>(
                 .as_union_value(),
             children: Some(fbb.create_vector(&empty_fields[..])),
         },
+        BinaryView | Utf8View => unimplemented!("unimplemented"),
         Utf8 => FBFieldType {
             type_type: crate::Type::Utf8,
             type_: crate::Utf8Builder::new(fbb).finish().as_union_value(),
@@ -663,6 +664,7 @@ pub(crate) fn get_fb_field_type<'a>(
                 children: Some(fbb.create_vector(&[child])),
             }
         }
+        ListView(_) | LargeListView(_) => unimplemented!("ListView/LargeListView not implemented"),
         LargeList(ref list_type) => {
             let child = build_field(fbb, list_type);
             FBFieldType {
@@ -877,6 +879,12 @@ mod tests {
                 Field::new("utf8", DataType::Utf8, false),
                 Field::new("binary", DataType::Binary, false),
                 Field::new_list("list[u8]", Field::new("item", DataType::UInt8, false), true),
+                Field::new_fixed_size_list(
+                    "fixed_size_list[u8]",
+                    Field::new("item", DataType::UInt8, false),
+                    2,
+                    true,
+                ),
                 Field::new_list(
                     "list[struct<float32, int32, bool>]",
                     Field::new_struct(

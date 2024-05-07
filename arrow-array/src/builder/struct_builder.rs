@@ -16,16 +16,90 @@
 // under the License.
 
 use crate::builder::*;
-use crate::{ArrayRef, StructArray};
+use crate::StructArray;
 use arrow_buffer::NullBufferBuilder;
-use arrow_schema::{DataType, Fields, IntervalUnit, TimeUnit};
-use std::any::Any;
+use arrow_schema::{DataType, Fields, IntervalUnit, SchemaBuilder, TimeUnit};
 use std::sync::Arc;
 
 /// Builder for [`StructArray`]
 ///
 /// Note that callers should make sure that methods of all the child field builders are
 /// properly called to maintain the consistency of the data structure.
+///
+///
+/// Handling arrays with complex layouts, such as `List<Struct<List<Struct>>>`, in Rust can be challenging due to its strong typing system.
+/// To construct a collection builder ([`ListBuilder`], [`LargeListBuilder`], or [`MapBuilder`]) using [`make_builder`], multiple calls are required. This complexity arises from the recursive approach utilized by [`StructBuilder::from_fields`].
+///
+/// Initially, [`StructBuilder::from_fields`] invokes [`make_builder`], which returns a `Box<dyn ArrayBuilder>`. To obtain the specific collection builder, one must first use [`StructBuilder::field_builder`] to get a `Collection<[Box<dyn ArrayBuilder>]>`. Subsequently, the `values()` result from this operation can be downcast to the desired builder type.
+///
+/// For example, when working with [`ListBuilder`], you would first call [`StructBuilder::field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>`] and then downcast the [`Box<dyn ArrayBuilder>`] to the specific [`StructBuilder`] you need.
+///
+/// For a practical example see the code below:
+///
+/// ```rust
+///    use arrow_array::builder::{ArrayBuilder, ListBuilder, StringBuilder, StructBuilder};
+///    use arrow_schema::{DataType, Field, Fields};
+///    use std::sync::Arc;
+///
+///    // This is an example column that has a List<Struct<List<Struct>>> layout
+///    let mut example_col = ListBuilder::new(StructBuilder::from_fields(
+///        vec![Field::new(
+///            "value_list",
+///            DataType::List(Arc::new(Field::new(
+///                "item",
+///                DataType::Struct(Fields::from(vec![
+///                    Field::new("key", DataType::Utf8, true),
+///                    Field::new("value", DataType::Utf8, true),
+///                ])), //In this example we are trying to get to this builder and insert key/value pairs
+///                true,
+///            ))),
+///            true,
+///        )],
+///        0,
+///    ));
+///
+///   // We can obtain the StructBuilder without issues, because example_col was created with StructBuilder
+///   let col_struct_builder: &mut StructBuilder = example_col.values();
+///
+///   // We can't obtain the ListBuilder<StructBuilder> with the expected generic types, because under the hood
+///   // the StructBuilder was returned as a Box<dyn ArrayBuilder> and passed as such to the ListBuilder constructor
+///   
+///   // This panics in runtime, even though we know that the builder is a ListBuilder<StructBuilder>.
+///   // let sb = col_struct_builder
+///   //     .field_builder::<ListBuilder<StructBuilder>>(0)
+///   //     .as_mut()
+///   //     .unwrap();
+///
+///   //To keep in line with Rust's strong typing, we fetch a ListBuilder<Box<dyn ArrayBuilder>> from the column StructBuilder first...
+///   let mut list_builder_option =
+///       col_struct_builder.field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(0);
+///
+///   let list_builder = list_builder_option.as_mut().unwrap();
+///
+///   // ... and then downcast the key/value pair values to a StructBuilder
+///   let struct_builder = list_builder
+///       .values()
+///       .as_any_mut()
+///       .downcast_mut::<StructBuilder>()
+///       .unwrap();
+///
+///   // We can now append values to the StructBuilder
+///   let key_builder = struct_builder.field_builder::<StringBuilder>(0).unwrap();
+///   key_builder.append_value("my key");
+///
+///   let value_builder = struct_builder.field_builder::<StringBuilder>(1).unwrap();
+///   value_builder.append_value("my value");
+///
+///   struct_builder.append(true);
+///   list_builder.append(true);
+///   col_struct_builder.append(true);
+///   example_col.append(true);
+///
+///   let array = example_col.finish();
+///
+///   println!("My array: {:?}", array);
+/// ```
+///
 pub struct StructBuilder {
     fields: Fields,
     field_builders: Vec<Box<dyn ArrayBuilder>>,
@@ -89,6 +163,8 @@ impl ArrayBuilder for StructBuilder {
 /// Returns a builder with capacity `capacity` that corresponds to the datatype `DataType`
 /// This function is useful to construct arrays from an arbitrary vectors with known/expected
 /// schema.
+///
+/// See comments on StructBuilder on how to retreive collection builders built by make_builder.
 pub fn make_builder(datatype: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
     use crate::builder::*;
     match datatype {
@@ -171,11 +247,11 @@ pub fn make_builder(datatype: &DataType, capacity: usize) -> Box<dyn ArrayBuilde
         }
         DataType::List(field) => {
             let builder = make_builder(field.data_type(), capacity);
-            Box::new(ListBuilder::with_capacity(builder, capacity))
+            Box::new(ListBuilder::with_capacity(builder, capacity).with_field(field.clone()))
         }
         DataType::LargeList(field) => {
             let builder = make_builder(field.data_type(), capacity);
-            Box::new(LargeListBuilder::with_capacity(builder, capacity))
+            Box::new(LargeListBuilder::with_capacity(builder, capacity).with_field(field.clone()))
         }
         DataType::Map(field, _) => match field.data_type() {
             DataType::Struct(fields) => {
@@ -186,12 +262,15 @@ pub fn make_builder(datatype: &DataType, capacity: usize) -> Box<dyn ArrayBuilde
                 };
                 let key_builder = make_builder(fields[0].data_type(), capacity);
                 let value_builder = make_builder(fields[1].data_type(), capacity);
-                Box::new(MapBuilder::with_capacity(
-                    Some(map_field_names),
-                    key_builder,
-                    value_builder,
-                    capacity,
-                ))
+                Box::new(
+                    MapBuilder::with_capacity(
+                        Some(map_field_names),
+                        key_builder,
+                        value_builder,
+                        capacity,
+                    )
+                    .with_values_field(fields[1].clone()),
+                )
             }
             t => panic!("The field of Map data type {t:?} should has a child Struct field"),
         },
@@ -286,9 +365,21 @@ impl StructBuilder {
         if self.fields.len() != self.field_builders.len() {
             panic!("Number of fields is not equal to the number of field_builders.");
         }
-        if !self.field_builders.iter().all(|x| x.len() == self.len()) {
-            panic!("StructBuilder and field_builders are of unequal lengths.");
-        }
+        self.field_builders.iter().enumerate().for_each(|(idx, x)| {
+            if x.len() != self.len() {
+                let builder = SchemaBuilder::from(&self.fields);
+                let schema = builder.finish();
+
+                panic!("{}", format!(
+                    "StructBuilder ({:?}) and field_builder with index {} ({:?}) are of unequal lengths: ({} != {}).",
+                    schema,
+                    idx,
+                    self.fields[idx].data_type(),
+                    self.len(),
+                    x.len()
+                ));
+            }
+        });
     }
 }
 
@@ -558,7 +649,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "StructBuilder and field_builders are of unequal lengths.")]
+    #[should_panic(
+        expected = "StructBuilder (Schema { fields: [Field { name: \"f1\", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"f2\", data_type: Boolean, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }], metadata: {} }) and field_builder with index 1 (Boolean) are of unequal lengths: (2 != 1)."
+    )]
     fn test_struct_array_builder_unequal_field_builders_lengths() {
         let mut int_builder = Int32Builder::with_capacity(10);
         let mut bool_builder = BooleanBuilder::new();

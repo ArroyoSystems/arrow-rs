@@ -62,7 +62,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "50.0.0"
+version = "51.0.0"
 homepage = "https://github.com/apache/arrow-rs"
 repository = "https://github.com/apache/arrow-rs"
 authors = ["Apache Arrow <dev@arrow.apache.org>"]
@@ -77,20 +77,20 @@ edition = "2021"
 rust-version = "1.62"
 
 [workspace.dependencies]
-arrow = { version = "50.0.0", default-features = false }
-arrow-arith = { version = "50.0.0" }
-arrow-array = { version = "50.0.0" }
-arrow-buffer = { version = "50.0.0"}
-arrow-cast = { version = "50.0.0" }
-arrow-csv = { version = "50.0.0" }
-arrow-data = { version = "50.0.0" }
-arrow-ipc = { version = "50.0.0" }
-arrow-json = { version = "50.0.0" }
-arrow-ord = { version = "50.0.0" }
-arrow-row = { version = "50.0.0" }
-arrow-schema = { version = "50.0.0" }
-arrow-select = { version = "50.0.0" }
-arrow-string = { version = "50.0.0" }
-parquet = { version = "50.0.0", default-features = false }
+arrow = { version = "51.0.0", default-features = false }
+arrow-arith = { version = "51.0.0" }
+arrow-array = { version = "51.0.0" }
+arrow-buffer = { version = "51.0.0"}
+arrow-cast = { version = "51.0.0" }
+arrow-csv = { version = "51.0.0" }
+arrow-data = { version = "51.0.0" }
+arrow-ipc = { version = "51.0.0" }
+arrow-json = { version = "51.0.0" }
+arrow-ord = { version = "51.0.0" }
+arrow-row = { version = "51.0.0" }
+arrow-schema = { version = "51.0.0" }
+arrow-select = { version = "51.0.0" }
+arrow-string = { version = "51.0.0" }
+parquet = { version = "51.0.0", default-features = false }
 
 chrono = { version = "0.4.31", default-features = false, features = ["clock"] }

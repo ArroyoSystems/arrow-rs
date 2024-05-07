@@ -80,6 +80,32 @@ mod levels;
 ///
 /// assert_eq!(to_write, read);
 /// ```
+///
+/// ## Memory Limiting
+///
+/// The nature of parquet forces buffering of an entire row group before it can be flushed
+/// to the underlying writer. Data is buffered in its encoded form, to reduce memory usage,
+/// but if writing rows containing large strings or very nested data, this may still result in
+/// non-trivial memory usage.
+///
+/// [`ArrowWriter::in_progress_size`] can be used to track the size of the buffered row group,
+/// and potentially trigger an early flush of a row group based on a memory threshold and/or
+/// global memory pressure. However, users should be aware that smaller row groups will result
+/// in higher metadata overheads, and may worsen compression ratios and query performance.
+///
+/// ```no_run
+/// # use std::io::Write;
+/// # use arrow_array::RecordBatch;
+/// # use parquet::arrow::ArrowWriter;
+/// # let mut writer: ArrowWriter<Vec<u8>> = todo!();
+/// # let batch: RecordBatch = todo!();
+/// writer.write(&batch).unwrap();
+/// // Trigger an early flush if buffered size exceeds 1_000_000
+/// if writer.in_progress_size() > 1_000_000 {
+///     writer.flush().unwrap();
+/// }
+/// ```
+///
 pub struct ArrowWriter<W: Write> {
     /// Underlying Parquet writer
     writer: SerializedFileWriter<W>,
@@ -120,10 +146,26 @@ impl<W: Write + Send> ArrowWriter<W> {
         arrow_schema: SchemaRef,
         props: Option<WriterProperties>,
     ) -> Result<Self> {
+        let options = ArrowWriterOptions::new().with_properties(props.unwrap_or_default());
+        Self::try_new_with_options(writer, arrow_schema, options)
+    }
+
+    /// Try to create a new Arrow writer with [`ArrowWriterOptions`].
+    ///
+    /// The writer will fail if:
+    ///  * a `SerializedFileWriter` cannot be created from the ParquetWriter
+    ///  * the Arrow schema contains unsupported datatypes such as Unions
+    pub fn try_new_with_options(
+        writer: W,
+        arrow_schema: SchemaRef,
+        options: ArrowWriterOptions,
+    ) -> Result<Self> {
         let schema = arrow_to_parquet_schema(&arrow_schema)?;
-        // add serialized arrow schema
-        let mut props = props.unwrap_or_default();
-        add_encoded_arrow_schema_to_metadata(&arrow_schema, &mut props);
+        let mut props = options.properties;
+        if !options.skip_arrow_metadata {
+            // add serialized arrow schema
+            add_encoded_arrow_schema_to_metadata(&arrow_schema, &mut props);
+        }
 
         let max_row_group_size = props.max_row_group_size();
 
@@ -163,11 +205,18 @@ impl<W: Write + Send> ArrowWriter<W> {
             .unwrap_or_default()
     }
 
+    /// Returns the number of bytes written by this instance
+    pub fn bytes_written(&self) -> usize {
+        self.writer.bytes_written()
+    }
+
     /// Encodes the provided [`RecordBatch`]
     ///
     /// If this would cause the current row group to exceed [`WriterProperties::max_row_group_size`]
     /// rows, the contents of `batch` will be written to one or more row groups such that all but
-    /// the final row group in the file contain [`WriterProperties::max_row_group_size`] rows
+    /// the final row group in the file contain [`WriterProperties::max_row_group_size`] rows.
+    ///
+    /// This will fail if the `batch`'s schema does not match the writer's schema.
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
@@ -221,6 +270,19 @@ impl<W: Write + Send> ArrowWriter<W> {
         self.writer.append_key_value_metadata(kv_metadata)
     }
 
+    /// Returns a reference to the underlying writer.
+    pub fn inner(&self) -> &W {
+        self.writer.inner()
+    }
+
+    /// Returns a mutable reference to the underlying writer.
+    ///
+    /// It is inadvisable to directly write to the underlying writer, doing so
+    /// will likely result in a corrupt parquet file
+    pub fn inner_mut(&mut self) -> &mut W {
+        self.writer.inner_mut()
+    }
+
     /// Flushes any outstanding data and returns the underlying writer.
     pub fn into_inner(mut self) -> Result<W> {
         self.flush()?;
@@ -228,9 +290,18 @@ impl<W: Write + Send> ArrowWriter<W> {
     }
 
     /// Close and finalize the underlying Parquet writer
-    pub fn close(mut self) -> Result<crate::format::FileMetaData> {
+    ///
+    /// Unlike [`Self::close`] this does not consume self
+    ///
+    /// Attempting to write after calling finish will result in an error
+    pub fn finish(&mut self) -> Result<crate::format::FileMetaData> {
         self.flush()?;
-        self.writer.close()
+        self.writer.finish()
+    }
+
+    /// Close and finalize the underlying Parquet writer
+    pub fn close(mut self) -> Result<crate::format::FileMetaData> {
+        self.finish()
     }
     pub fn get_trailing_bytes(&mut self, target: W) -> Result<W> {
         self.writer.write_trailing_bytes(target)
@@ -245,6 +316,38 @@ impl<W: Write + Send> RecordBatchWriter for ArrowWriter<W> {
     fn close(self) -> std::result::Result<(), ArrowError> {
         self.close()?;
         Ok(())
+    }
+}
+
+/// Arrow-specific configuration settings for writing parquet files.
+///
+/// See [`ArrowWriter`] for how to configure the writer.
+#[derive(Debug, Clone, Default)]
+pub struct ArrowWriterOptions {
+    properties: WriterProperties,
+    skip_arrow_metadata: bool,
+}
+
+impl ArrowWriterOptions {
+    /// Creates a new [`ArrowWriterOptions`] with the default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the [`WriterProperties`] for writing parquet files.
+    pub fn with_properties(self, properties: WriterProperties) -> Self {
+        Self { properties, ..self }
+    }
+
+    /// Parquet files generated by the [`ArrowWriter`] contain embedded arrow schema
+    /// by default.
+    ///
+    /// Set `skip_arrow_metadata` to true, to skip encoding this.
+    pub fn with_skip_arrow_metadata(self, skip_arrow_metadata: bool) -> Self {
+        Self {
+            skip_arrow_metadata,
+            ..self
+        }
     }
 }
 
@@ -902,17 +1005,15 @@ fn get_fsb_array_slice(
 mod tests {
     use super::*;
 
-    use bytes::Bytes;
     use std::fs::File;
-    use std::sync::Arc;
 
     use crate::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+    use crate::arrow::ARROW_SCHEMA_META_KEY;
     use arrow::datatypes::ToByteSlice;
-    use arrow::datatypes::{DataType, Field, Schema, UInt32Type, UInt8Type};
+    use arrow::datatypes::{DataType, Schema};
     use arrow::error::Result as ArrowResult;
     use arrow::util::pretty::pretty_format_batches;
     use arrow::{array::*, buffer::Buffer};
-    use arrow_array::RecordBatch;
     use arrow_buffer::NullBuffer;
     use arrow_schema::Fields;
 
@@ -1582,6 +1683,9 @@ mod tests {
             | DataType::UInt32
             | DataType::UInt16
             | DataType::UInt8 => vec![Encoding::PLAIN, Encoding::DELTA_BINARY_PACKED],
+            DataType::Float32 | DataType::Float64 => {
+                vec![Encoding::PLAIN, Encoding::BYTE_STREAM_SPLIT]
+            }
             _ => vec![Encoding::PLAIN],
         };
 
@@ -2697,6 +2801,7 @@ mod tests {
         // starts empty
         assert_eq!(writer.in_progress_size(), 0);
         assert_eq!(writer.in_progress_rows(), 0);
+        assert_eq!(writer.bytes_written(), 4); // Initial header
         writer.write(&batch).unwrap();
 
         // updated on write
@@ -2709,10 +2814,12 @@ mod tests {
         assert!(writer.in_progress_size() > initial_size);
         assert_eq!(writer.in_progress_rows(), 10);
 
-        // cleared on flush
+        // in progress tracking is cleared, but the overall data written is updated
+        let pre_flush_bytes_written = writer.bytes_written();
         writer.flush().unwrap();
         assert_eq!(writer.in_progress_size(), 0);
         assert_eq!(writer.in_progress_rows(), 0);
+        assert!(writer.bytes_written() > pre_flush_bytes_written);
 
         writer.close().unwrap();
     }
@@ -2881,5 +2988,62 @@ mod tests {
         assert!(matches!(a_idx, Index::NONE), "{a_idx:?}");
         let b_idx = &column_index[0][1];
         assert!(matches!(b_idx, Index::NONE), "{b_idx:?}");
+    }
+
+    #[test]
+    fn test_arrow_writer_skip_metadata() {
+        let batch_schema = Schema::new(vec![Field::new("int32", DataType::Int32, false)]);
+        let file_schema = Arc::new(batch_schema.clone());
+
+        let batch = RecordBatch::try_new(
+            Arc::new(batch_schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4])) as _],
+        )
+        .unwrap();
+        let skip_options = ArrowWriterOptions::new().with_skip_arrow_metadata(true);
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut writer =
+            ArrowWriter::try_new_with_options(&mut buf, file_schema.clone(), skip_options).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let bytes = Bytes::from(buf);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        assert_eq!(file_schema, *reader_builder.schema());
+        if let Some(key_value_metadata) = reader_builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+        {
+            assert!(!key_value_metadata
+                .iter()
+                .any(|kv| kv.key.as_str() == ARROW_SCHEMA_META_KEY));
+        }
+    }
+
+    #[test]
+    fn mismatched_schemas() {
+        let batch_schema = Schema::new(vec![Field::new("count", DataType::Int32, false)]);
+        let file_schema = Arc::new(Schema::new(vec![Field::new(
+            "temperature",
+            DataType::Float64,
+            false,
+        )]));
+
+        let batch = RecordBatch::try_new(
+            Arc::new(batch_schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4])) as _],
+        )
+        .unwrap();
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut writer = ArrowWriter::try_new(&mut buf, file_schema.clone(), None).unwrap();
+
+        let err = writer.write(&batch).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Arrow: Incompatible type. Field 'temperature' has type Float64, array has type Int32"
+        );
     }
 }

@@ -178,7 +178,10 @@ mod generic_bytes_dictionary_builder;
 pub use generic_bytes_dictionary_builder::*;
 mod generic_byte_run_builder;
 pub use generic_byte_run_builder::*;
+mod generic_bytes_view_builder;
+pub use generic_bytes_view_builder::*;
 mod union_builder;
+
 pub use union_builder::*;
 
 use crate::ArrayRef;
@@ -232,7 +235,7 @@ use std::any::Any;
 ///     "🍎"
 /// );
 /// ```
-pub trait ArrayBuilder: Any + Send {
+pub trait ArrayBuilder: Any + Send + Sync {
     /// Returns the number of array slots in the builder
     fn len(&self) -> usize;
 

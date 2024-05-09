@@ -36,7 +36,7 @@
 //!
 //! let mut buffer = Vec::new();
 //! let mut writer =
-//!     AsyncArrowWriter::try_new(&mut buffer, to_write.schema(), 0, None).unwrap();
+//!     AsyncArrowWriter::try_new_with_buffer(&mut buffer, to_write.schema(), 0, None).unwrap();
 //! writer.write(&to_write).await.unwrap();
 //! writer.close().await.unwrap();
 //!
@@ -113,7 +113,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncArrowWriter<W> {
     /// to the underlying [`AsyncWrite`]. However, the nature of writing parquet may
     /// force buffering of data in excess of this within the underlying [`ArrowWriter`].
     /// See the documentation on [`ArrowWriter`] for more details
-    pub fn try_new(
+    pub fn try_new_with_buffer(
         writer: W,
         arrow_schema: SchemaRef,
         buffer_size: usize,
@@ -121,6 +121,16 @@ impl<W: AsyncWrite + Unpin + Send> AsyncArrowWriter<W> {
     ) -> Result<Self> {
         let options = ArrowWriterOptions::new().with_properties(props.unwrap_or_default());
         Self::try_new_with_options(writer, arrow_schema, buffer_size, options)
+    }
+
+    /// Try to create a new Async Arrow Writer.
+    pub fn try_new(
+        writer: W,
+        arrow_schema: SchemaRef,
+        props: Option<WriterProperties>,
+    ) -> Result<Self> {
+        let options = ArrowWriterOptions::new().with_properties(props.unwrap_or_default());
+        Self::try_new_with_options(writer, arrow_schema, 10485760, options)
     }
 
     /// Try to create a new Async Arrow Writer with [`ArrowWriterOptions`].
@@ -299,7 +309,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         let mut writer =
-            AsyncArrowWriter::try_new(&mut buffer, to_write.schema(), 0, None).unwrap();
+            AsyncArrowWriter::try_new_with_buffer(&mut buffer, to_write.schema(), 0, None).unwrap();
         writer.write(&to_write).await.unwrap();
         writer.close().await.unwrap();
 
@@ -324,7 +334,7 @@ mod tests {
             .build();
 
         let mut async_buffer = Vec::new();
-        let mut async_writer = AsyncArrowWriter::try_new(
+        let mut async_writer = AsyncArrowWriter::try_new_with_buffer(
             &mut async_buffer,
             reader.schema(),
             1024,
@@ -397,7 +407,7 @@ mod tests {
         let expect_encode_size = {
             let reader = get_test_reader();
             let mut buffer = Vec::new();
-            let mut async_writer = AsyncArrowWriter::try_new(
+            let mut async_writer = AsyncArrowWriter::try_new_with_buffer(
                 &mut buffer,
                 reader.schema(),
                 0,
@@ -421,7 +431,7 @@ mod tests {
                 min_accept_bytes: buffer_flush_threshold,
                 expect_total_bytes: expect_encode_size,
             };
-            let mut async_writer = AsyncArrowWriter::try_new(
+            let mut async_writer = AsyncArrowWriter::try_new_with_buffer(
                 &mut test_async_sink,
                 reader.schema(),
                 buffer_flush_threshold * 2,
@@ -450,7 +460,7 @@ mod tests {
         let temp = tempfile::tempfile().unwrap();
 
         let file = tokio::fs::File::from_std(temp.try_clone().unwrap());
-        let mut writer = AsyncArrowWriter::try_new(file, to_write.schema(), 0, None).unwrap();
+        let mut writer = AsyncArrowWriter::try_new_with_buffer(file, to_write.schema(), 0, None).unwrap();
         writer.write(&to_write).await.unwrap();
         writer.close().await.unwrap();
 
@@ -478,7 +488,7 @@ mod tests {
             let temp = tempfile::tempfile().unwrap();
             let file = tokio::fs::File::from_std(temp.try_clone().unwrap());
             let mut writer =
-                AsyncArrowWriter::try_new(file, batch.schema(), buffer_size, None).unwrap();
+                AsyncArrowWriter::try_new_with_buffer(file, batch.schema(), buffer_size, None).unwrap();
 
             // starts empty
             assert_eq!(writer.in_progress_size(), 0);

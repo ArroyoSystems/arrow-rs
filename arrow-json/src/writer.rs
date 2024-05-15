@@ -119,7 +119,7 @@ use arrow_array::types::*;
 use arrow_array::*;
 use arrow_schema::*;
 
-use crate::writer::encoder::{EncoderOptions};
+use crate::writer::encoder::EncoderOptions;
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use encoder::make_encoder;
 
@@ -397,7 +397,6 @@ impl<'a> TimeFormatter<'a> {
     }
 }
 
-
 fn set_column_for_json_rows(
     rows: &mut [Option<JsonMap<String, Value>>],
     array: &ArrayRef,
@@ -674,12 +673,16 @@ pub fn record_batch_to_vec(
     explicit_nulls: bool,
     timestamp_format: TimestampFormat,
 ) -> Result<Vec<Vec<u8>>, ArrowError> {
-    let array  = StructArray::from(batch.clone());
-    let mut encoder = make_encoder(&array, &HashMap::new(), &EncoderOptions {
-        explicit_nulls,
-        timestamp_format,
-    })?;
-    
+    let array = StructArray::from(batch.clone());
+    let mut encoder = make_encoder(
+        &array,
+        &HashMap::new(),
+        &EncoderOptions {
+            explicit_nulls,
+            timestamp_format,
+        },
+    )?;
+
     let mut results = Vec::with_capacity(batch.num_rows());
     for idx in 0..array.len() {
         let mut buffer = Vec::with_capacity(8);
@@ -688,7 +691,7 @@ pub fn record_batch_to_vec(
             results.push(buffer);
         }
     }
-    
+
     Ok(results)
 }
 
@@ -1098,15 +1101,23 @@ mod tests {
     #[test]
     fn write_raw_json() {
         let mut metadata = HashMap::new();
-        metadata.insert("ARROW:extension:name".to_string(), "arroyo.json".to_string());
+        metadata.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
         let schema = Schema::new(vec![
             Field::new("c1", DataType::Utf8, true),
-            Field::new("c2", DataType::Utf8, true)
-                .with_metadata(metadata),
+            Field::new("c2", DataType::Utf8, true).with_metadata(metadata),
         ]);
 
         let a = StringArray::from(vec![Some("a"), None, Some("c"), Some("d"), None]);
-        let b = StringArray::from(vec![Some("true"), Some("10"), None, Some(r#"{"a": [1, 2, 3]}"#), None]);
+        let b = StringArray::from(vec![
+            Some("true"),
+            Some("10"),
+            None,
+            Some(r#"{"a": [1, 2, 3]}"#),
+            None,
+        ]);
 
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a), Arc::new(b)]).unwrap();
 
@@ -1126,7 +1137,6 @@ mod tests {
 "#,
         );
     }
-    
 
     #[test]
     fn write_dictionary() {
@@ -1660,7 +1670,7 @@ mod tests {
 "#,
         );
     }
-    
+
     #[test]
     fn write_struct_with_list_field() {
         let field_c1 = Field::new(

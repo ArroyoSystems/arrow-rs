@@ -75,14 +75,16 @@ impl ParseJsonNumber for f64 {
 
 pub struct PrimitiveArrayDecoder<P: ArrowPrimitiveType> {
     data_type: DataType,
+    is_nullable: bool,
     // Invariant and Send
     phantom: PhantomData<fn(P) -> P>,
 }
 
 impl<P: ArrowPrimitiveType> PrimitiveArrayDecoder<P> {
-    pub fn new(data_type: DataType) -> Self {
+    pub fn new(data_type: DataType, is_nullable: bool) -> Self {
         Self {
             data_type,
+            is_nullable,
             phantom: Default::default(),
         }
     }
@@ -155,5 +157,47 @@ where
         }
 
         Ok(builder.finish().into_data())
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::String(idx) => {
+                let s = tape.get_string(idx);
+                P::parse(s).is_some()
+            }
+            TapeElement::Number(idx) => {
+                let s = tape.get_string(idx);
+                let v: Option<<P as ArrowPrimitiveType>::Native> =
+                    ParseJsonNumber::parse(s.as_bytes());
+                v.is_some()
+            }
+            TapeElement::F32(v) => {
+                let v = f32::from_bits(v);
+                let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
+                v.is_some()
+            }
+            TapeElement::I32(v) => {
+                let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
+                v.is_some()
+            }
+            TapeElement::F64(high) => match tape.get(pos + 1) {
+                TapeElement::F32(low) => {
+                    let v = f64::from_bits((high as u64) << 32 | low as u64);
+                    let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
+                    v.is_some()
+                }
+                _ => unreachable!(),
+            },
+            TapeElement::I64(high) => match tape.get(pos + 1) {
+                TapeElement::I32(low) => {
+                    let v = (high as i64) << 32 | (low as u32) as i64;
+                    let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
+                    v.is_some()
+                }
+                _ => unreachable!(),
+            },
+            _ => false,
+        }
     }
 }

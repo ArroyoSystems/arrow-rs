@@ -162,4 +162,8 @@ impl ArrayDecoder for StringViewArrayDecoder {
         let array = builder.finish();
         Ok(array.into_data())
     }
+
+    fn validate_row(&self, _tape: &Tape<'_>, _pos: u32) -> bool {
+        todo!("string views are not yet supported")
+    }
 }

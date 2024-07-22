@@ -32,15 +32,17 @@ use crate::reader::ArrayDecoder;
 pub struct TimestampArrayDecoder<P: ArrowTimestampType, Tz: TimeZone> {
     data_type: DataType,
     timezone: Tz,
+    is_nullable: bool,
     // Invariant and Send
     phantom: PhantomData<fn(P) -> P>,
 }
 
 impl<P: ArrowTimestampType, Tz: TimeZone> TimestampArrayDecoder<P, Tz> {
-    pub fn new(data_type: DataType, timezone: Tz) -> Self {
+    pub fn new(data_type: DataType, timezone: Tz, is_nullable: bool) -> Self {
         Self {
             data_type,
             timezone,
+            is_nullable,
             phantom: Default::default(),
         }
     }
@@ -106,5 +108,31 @@ where
         }
 
         Ok(builder.finish().into_data())
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::String(idx) => {
+                let s = tape.get_string(idx);
+                if let Ok(d) = string_to_datetime(&self.timezone, s) {
+                    match P::UNIT {
+                        TimeUnit::Nanosecond => d.timestamp_nanos_opt().is_some(),
+                        _ => true,
+                    }
+                } else {
+                    false
+                }
+            }
+            TapeElement::Number(idx) => {
+                let s = tape.get_string(idx);
+                let b = s.as_bytes();
+                lexical_core::parse::<i64>(b)
+                    .or_else(|_| lexical_core::parse::<f64>(b).map(|x| x as i64))
+                    .is_ok()
+            }
+            TapeElement::I32(_) | TapeElement::I64(_) => true,
+            _ => false,
+        }
     }
 }

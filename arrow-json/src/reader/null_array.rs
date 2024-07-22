@@ -32,4 +32,8 @@ impl ArrayDecoder for NullArrayDecoder {
         }
         ArrayDataBuilder::new(DataType::Null).len(pos.len()).build()
     }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        matches!(tape.get(pos), TapeElement::Null)
+    }
 }

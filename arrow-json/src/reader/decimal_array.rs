@@ -30,15 +30,17 @@ use crate::reader::ArrayDecoder;
 pub struct DecimalArrayDecoder<D: DecimalType> {
     precision: u8,
     scale: i8,
+    is_nullable: bool,
     // Invariant and Send
     phantom: PhantomData<fn(D) -> D>,
 }
 
 impl<D: DecimalType> DecimalArrayDecoder<D> {
-    pub fn new(precision: u8, scale: i8) -> Self {
+    pub fn new(precision: u8, scale: i8, is_nullable: bool) -> Self {
         Self {
             precision,
             scale,
+            is_nullable,
             phantom: PhantomData,
         }
     }
@@ -98,5 +100,20 @@ where
             .finish()
             .with_precision_and_scale(self.precision, self.scale)?
             .into_data())
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::String(idx) => {
+                let s = tape.get_string(idx);
+                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+            }
+            TapeElement::Number(idx) => {
+                let s = tape.get_string(idx);
+                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+            }
+            _ => false,
+        }
     }
 }

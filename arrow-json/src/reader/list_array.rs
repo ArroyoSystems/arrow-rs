@@ -45,6 +45,7 @@ impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
         };
         let decoder = make_decoder(
             field.data_type().clone(),
+            field.metadata(),
             coerce_primitive,
             strict_mode,
             field.is_nullable(),
@@ -109,5 +110,30 @@ impl<O: OffsetSizeTrait> ArrayDecoder for ListArrayDecoder<O> {
         // Safety
         // Validated lengths above
         Ok(unsafe { data.build_unchecked() })
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        let end_idx = match (tape.get(pos), self.is_nullable) {
+            (TapeElement::StartList(end_idx), _) => end_idx,
+            (TapeElement::Null, true) => {
+                return true;
+            }
+            _ => return false,
+        };
+
+        let mut cur_idx = pos + 1;
+        while cur_idx < end_idx {
+            if !self.decoder.validate_row(tape, cur_idx) {
+                return false;
+            }
+            // Advance to next field
+            if let Ok(next) = tape.next(cur_idx, "list value") {
+                cur_idx = next;
+            } else {
+                return false;
+            }
+        }
+
+        true
     }
 }

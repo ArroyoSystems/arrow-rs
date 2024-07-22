@@ -12,23 +12,27 @@
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 // KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
+// specific language governing 6permissions and limitations
 // under the License.
 
+use crate::writer::TimestampFormat;
 use arrow_array::cast::AsArray;
 use arrow_array::types::*;
 use arrow_array::*;
 use arrow_buffer::{ArrowNativeType, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
-use arrow_schema::{ArrowError, DataType, FieldRef};
+use arrow_schema::{ArrowError, DataType, FieldRef, TimeUnit};
 use half::f16;
 use lexical_core::FormattedSize;
 use serde::Serializer;
+use std::collections::HashMap;
 use std::io::Write;
 
 #[derive(Debug, Clone, Default)]
 pub struct EncoderOptions {
     pub explicit_nulls: bool,
+    /// Sets the timestamp serialization format
+    pub timestamp_format: TimestampFormat,
 }
 
 /// A trait to format array values as JSON values
@@ -43,15 +47,17 @@ pub trait Encoder {
 
 pub fn make_encoder<'a>(
     array: &'a dyn Array,
+    metadata: &HashMap<String, String>,
     options: &EncoderOptions,
 ) -> Result<Box<dyn Encoder + 'a>, ArrowError> {
-    let (encoder, nulls) = make_encoder_impl(array, options)?;
+    let (encoder, nulls) = make_encoder_impl(array, metadata, options)?;
     assert!(nulls.is_none(), "root cannot be nullable");
     Ok(encoder)
 }
 
 fn make_encoder_impl<'a>(
     array: &'a dyn Array,
+    metadata: &HashMap<String, String>,
     options: &EncoderOptions,
 ) -> Result<(Box<dyn Encoder + 'a>, Option<NullBuffer>), ArrowError> {
     macro_rules! primitive_helper {
@@ -74,7 +80,11 @@ fn make_encoder_impl<'a>(
         DataType::Null => (Box::new(NullEncoder), array.logical_nulls()),
         DataType::Utf8 => {
             let array = array.as_string::<i32>();
-            (Box::new(StringEncoder(array)) as _, array.nulls().cloned())
+            if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
+                (Box::new(RawJsonEncoder(array.clone())) as _, array.nulls().cloned())
+            } else {
+                (Box::new(StringEncoder(array)) as _, array.nulls().cloned())
+            }
         }
         DataType::LargeUtf8 => {
             let array = array.as_string::<i64>();
@@ -121,7 +131,7 @@ fn make_encoder_impl<'a>(
         DataType::Struct(fields) => {
             let array = array.as_struct();
             let encoders = fields.iter().zip(array.columns()).map(|(field, array)| {
-                let (encoder, nulls) = make_encoder_impl(array, options)?;
+                let (encoder, nulls) = make_encoder_impl(array, field.metadata(), options)?;
                 Ok(FieldEncoder{
                     field: field.clone(),
                     encoder, nulls
@@ -140,9 +150,10 @@ fn make_encoder_impl<'a>(
                 // characters that would need to be escaped within a JSON string, e.g. `'"'`.
                 // If support for user-provided format specifications is added, this assumption
                 // may need to be revisited
-                let options = FormatOptions::new().with_display_error(true);
-                let formatter = ArrayFormatter::try_new(array, &options)?;
-                (Box::new(formatter) as _, array.nulls().cloned())
+                let formatter = TimeEncoder::for_timestamp_format(
+                    options.timestamp_format, array)?;
+
+                (formatter, array.nulls().cloned())
             }
             false => return Err(ArrowError::InvalidArgumentError(format!("JSON Writer does not support data type: {d}"))),
         }
@@ -306,6 +317,19 @@ impl<'a, O: OffsetSizeTrait> Encoder for StringEncoder<'a, O> {
     }
 }
 
+struct RawJsonEncoder<O: OffsetSizeTrait>(GenericStringArray<O>);
+
+impl<O: OffsetSizeTrait> Encoder for RawJsonEncoder<O> {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(self.0.value(idx)) {
+            serde_json::to_writer(out, &v)
+                // cannot fail when writing to a Vec buffer
+                .unwrap()
+        }
+    }
+}
+
+
 struct ListEncoder<'a, O: OffsetSizeTrait> {
     offsets: OffsetBuffer<O>,
     nulls: Option<NullBuffer>,
@@ -317,7 +341,8 @@ impl<'a, O: OffsetSizeTrait> ListEncoder<'a, O> {
         array: &'a GenericListArray<O>,
         options: &EncoderOptions,
     ) -> Result<Self, ArrowError> {
-        let (encoder, nulls) = make_encoder_impl(array.values().as_ref(), options)?;
+        let (encoder, nulls) =
+            make_encoder_impl(array.values().as_ref(), &HashMap::new(), options)?;
         Ok(Self {
             offsets: array.offsets().clone(),
             encoder,
@@ -363,7 +388,7 @@ impl<'a> FixedSizeListEncoder<'a> {
         array: &'a FixedSizeListArray,
         options: &EncoderOptions,
     ) -> Result<Self, ArrowError> {
-        let (encoder, nulls) = make_encoder_impl(array.values().as_ref(), options)?;
+        let (encoder, nulls) = make_encoder_impl(array.values().as_ref(), &HashMap::new(), options)?;
         Ok(Self {
             encoder,
             nulls,
@@ -409,7 +434,7 @@ impl<'a, K: ArrowDictionaryKeyType> DictionaryEncoder<'a, K> {
         array: &'a DictionaryArray<K>,
         options: &EncoderOptions,
     ) -> Result<Self, ArrowError> {
-        let encoder = make_encoder(array.values().as_ref(), options)?;
+        let encoder = make_encoder(array.values().as_ref(), &HashMap::new(), options)?;
 
         Ok(Self {
             keys: array.keys().values().clone(),
@@ -462,8 +487,8 @@ impl<'a> MapEncoder<'a> {
             )));
         }
 
-        let (keys, key_nulls) = make_encoder_impl(keys, options)?;
-        let (values, value_nulls) = make_encoder_impl(values, options)?;
+        let (keys, key_nulls) = make_encoder_impl(keys, &HashMap::new(), options)?;
+        let (values, value_nulls) = make_encoder_impl(values, &HashMap::new(), options)?;
 
         // We sanity check nulls as these are currently not enforced by MapArray (#1697)
         if is_some_and(key_nulls, |x| x.null_count() != 0) {
@@ -543,5 +568,95 @@ where
             write!(out, "{byte:02x}").unwrap();
         }
         out.push(b'"');
+    }
+}
+
+
+enum TimeEncoder {
+    UnixMillisDate32(Date32Array),
+    UnixMillisDate64(Date64Array),
+    UnixMillisTimestampNanos(TimestampNanosecondArray),
+    UnixMillisTimestampMicros(TimestampMicrosecondArray),
+    UnixMillisTimestampMillis(TimestampMillisecondArray),
+    UnixMillisTimestampSeconds(TimestampSecondArray),
+}
+
+impl TimeEncoder {
+    fn for_timestamp_format<'a>(
+        timestamp_format: TimestampFormat,
+        array: &'a dyn Array,
+    ) -> Result<Box<dyn Encoder + 'a>, ArrowError> {
+        Ok(Box::new(match timestamp_format {
+            TimestampFormat::RFC3339 => {
+                let options = FormatOptions::default();
+                let formatter = ArrayFormatter::try_new(array, &options)?;
+                return Ok(Box::new(formatter));
+            }
+            TimestampFormat::UnixMillis => match array.data_type() {
+                DataType::Timestamp(TimeUnit::Second, _) => Self::UnixMillisTimestampSeconds(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampSecondArray>()
+                        .unwrap()
+                        .clone(),
+                ),
+                DataType::Timestamp(TimeUnit::Millisecond, _) => Self::UnixMillisTimestampMillis(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .clone(),
+                ),
+                DataType::Timestamp(TimeUnit::Microsecond, _) => Self::UnixMillisTimestampMicros(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap()
+                        .clone(),
+                ),
+                DataType::Timestamp(TimeUnit::Nanosecond, _) => Self::UnixMillisTimestampNanos(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .unwrap()
+                        .clone(),
+                ),
+                DataType::Date32 => Self::UnixMillisDate32(
+                    array
+                        .as_any()
+                        .downcast_ref::<Date32Array>()
+                        .unwrap()
+                        .clone(),
+                ),
+                DataType::Date64 => Self::UnixMillisDate64(
+                    array
+                        .as_any()
+                        .downcast_ref::<Date64Array>()
+                        .unwrap()
+                        .clone(),
+                ),
+                _ => {
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "cannot have time format field with type {}",
+                        array.data_type()
+                    )));
+                }
+            },
+        }))
+    }
+}
+
+impl Encoder for TimeEncoder {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        let millis = match self {
+            TimeEncoder::UnixMillisDate32(a) => (a.value(idx) as f64) * 86400.0 * 1000.0,
+            TimeEncoder::UnixMillisDate64(a) => a.value(idx) as f64,
+            TimeEncoder::UnixMillisTimestampNanos(a) => a.value(idx) as f64 / 1_000_000.0,
+            TimeEncoder::UnixMillisTimestampMicros(a) => a.value(idx) as f64 / 1_000.0,
+            TimeEncoder::UnixMillisTimestampMillis(a) => a.value(idx) as f64,
+            TimeEncoder::UnixMillisTimestampSeconds(a) => a.value(idx) as f64 * 1000.0,
+        } as i64;
+
+        out.extend_from_slice(millis.to_string().as_bytes());
     }
 }

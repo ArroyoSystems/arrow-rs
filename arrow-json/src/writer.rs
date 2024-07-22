@@ -106,6 +106,7 @@
 //! ```
 mod encoder;
 
+use std::collections::HashMap;
 use std::{fmt::Debug, io::Write};
 
 use arrow_array::*;
@@ -113,6 +114,7 @@ use arrow_schema::*;
 
 use crate::writer::encoder::EncoderOptions;
 use encoder::make_encoder;
+
 
 /// This trait defines how to format a sequence of JSON objects to a
 /// byte stream.
@@ -195,6 +197,16 @@ pub type LineDelimitedWriter<W> = Writer<W, LineDelimited>;
 /// A JSON writer which serializes [`RecordBatch`]es to JSON arrays.
 pub type ArrayWriter<W> = Writer<W, JsonArray>;
 
+/// Configuration for how timestamps are serialized
+#[derive(Debug, Copy, Clone, Default)]
+pub enum TimestampFormat {
+    /// Serialize as RFC3339
+    #[default]
+    RFC3339,
+    /// Serialize as milliseconds since the UNIX Epoch
+    UnixMillis,
+}
+
 /// JSON writer builder.
 #[derive(Debug, Clone, Default)]
 pub struct WriterBuilder(EncoderOptions);
@@ -251,6 +263,12 @@ impl WriterBuilder {
     /// Default is to skip nulls (set to `false`).
     pub fn with_explicit_nulls(mut self, explicit_nulls: bool) -> Self {
         self.0.explicit_nulls = explicit_nulls;
+        self
+    }
+
+    /// Sets the timestamp format, controlling how timestamps are serialized in JSON
+    pub fn with_timestamp_format(mut self, timestamp_format: TimestampFormat) -> Self {
+        self.0.timestamp_format = timestamp_format;
         self
     }
 
@@ -335,7 +353,7 @@ where
         }
 
         let array = StructArray::from(batch.clone());
-        let mut encoder = make_encoder(&array, &self.options)?;
+        let mut encoder = make_encoder(&array, &HashMap::new(), &self.options)?;
 
         for idx in 0..batch.num_rows() {
             self.format.start_row(&mut buffer, is_first_row)?;
@@ -480,6 +498,46 @@ mod tests {
 {"c2":"b"}
 {"c1":"c"}
 {"c1":"d","c2":"d"}
+{}
+"#,
+        );
+    }
+
+    #[test]
+    fn write_raw_json() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
+        let schema = Schema::new(vec![
+            Field::new("c1", DataType::Utf8, true),
+            Field::new("c2", DataType::Utf8, true).with_metadata(metadata),
+        ]);
+
+        let a = StringArray::from(vec![Some("a"), None, Some("c"), Some("d"), None]);
+        let b = StringArray::from(vec![
+            Some("true"),
+            Some("10"),
+            None,
+            Some(r#"{"a": [1, 2, 3]}"#),
+            None,
+        ]);
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a), Arc::new(b)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"c1":"a","c2":true}
+{"c2":10}
+{"c1":"c"}
+{"c1":"d","c2":{"a":[1,2,3]}}
 {}
 "#,
         );
@@ -667,6 +725,61 @@ mod tests {
     }
 
     #[test]
+    fn write_timestamps_as_millis() {
+        let ts_string = "2018-11-13T17:11:10.011375885995";
+        let ts_nanos = ts_string
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let ts_micros = ts_nanos / 1000;
+        let ts_millis = ts_micros / 1000;
+        let ts_secs = ts_millis / 1000;
+
+        let arr_nanos = TimestampNanosecondArray::from(vec![Some(ts_nanos), None]);
+        let arr_micros = TimestampMicrosecondArray::from(vec![Some(ts_micros), None]);
+        let arr_millis = TimestampMillisecondArray::from(vec![Some(ts_millis), None]);
+        let arr_secs = TimestampSecondArray::from(vec![Some(ts_secs), None]);
+        let arr_names = StringArray::from(vec![Some("a"), Some("b")]);
+
+        let schema = Schema::new(vec![
+            Field::new("nanos", arr_nanos.data_type().clone(), true),
+            Field::new("micros", arr_micros.data_type().clone(), true),
+            Field::new("millis", arr_millis.data_type().clone(), true),
+            Field::new("secs", arr_secs.data_type().clone(), true),
+            Field::new("name", arr_names.data_type().clone(), true),
+        ]);
+        let schema = Arc::new(schema);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arr_nanos),
+                Arc::new(arr_micros),
+                Arc::new(arr_millis),
+                Arc::new(arr_secs),
+                Arc::new(arr_names),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.options.timestamp_format = TimestampFormat::UnixMillis;
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"micros":1542129070011,"millis":1542129070011,"name":"a","nanos":1542129070011,"secs":1542129070000}
+{"name":"b"}
+"#,
+        );
+    }
+
+    #[test]
     fn write_timestamps_with_tz() {
         let ts_string = "2018-11-13T17:11:10.011375885995";
         let ts_nanos = ts_string
@@ -769,6 +882,54 @@ mod tests {
         assert_json_eq(
             &buf,
             r#"{"date32":"2018-11-13","date64":"2018-11-13T17:11:10.011","name":"a"}
+{"name":"b"}
+"#,
+        );
+    }
+
+    #[test]
+    fn write_dates_as_millis() {
+        let ts_string = "2018-11-13T17:11:10.011375885995";
+        let ts_millis = ts_string
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+
+        let arr_date32 = Date32Array::from(vec![
+            Some(i32::try_from(ts_millis / 1000 / (60 * 60 * 24)).unwrap()),
+            None,
+        ]);
+        let arr_date64 = Date64Array::from(vec![Some(ts_millis), None]);
+        let arr_names = StringArray::from(vec![Some("a"), Some("b")]);
+
+        let schema = Schema::new(vec![
+            Field::new("date32", arr_date32.data_type().clone(), true),
+            Field::new("date64", arr_date64.data_type().clone(), true),
+            Field::new("name", arr_names.data_type().clone(), false),
+        ]);
+        let schema = Arc::new(schema);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arr_date32),
+                Arc::new(arr_date64),
+                Arc::new(arr_names),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.options.timestamp_format = TimestampFormat::UnixMillis;
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"date32":1542067200000,"date64":1542129070011,"name":"a"}
 {"name":"b"}
 "#,
         );

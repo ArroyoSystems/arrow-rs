@@ -34,11 +34,11 @@ path = "src/lib.rs"
 bench = false
 
 [dependencies]
-arrow-array = { version = "51.0.0" }
-arrow-buffer = { version = "51.0.0" }
-arrow-cast = { version = "51.0.0" }
-arrow-data = { version = "51.0.0" }
-arrow-schema = { version = "51.0.0" }
+arrow-array = { version = "52.1.0" }
+arrow-buffer = { version = "52.1.0" }
+arrow-cast = { version = "52.1.0" }
+arrow-data = { version = "52.1.0" }
+arrow-schema = { version = "52.1.0" }
 half = { version = "2.1", default-features = false }
 indexmap = { version = "2.0", default-features = false, features = ["std"] }
 num = { version = "0.4", default-features = false, features = ["std"] }

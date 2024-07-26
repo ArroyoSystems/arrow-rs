@@ -413,6 +413,31 @@ where
     }
 }
 
+/// Writes a record batch as a Vec of encoded JSON rows
+pub fn record_batch_to_vec(
+    batch: &RecordBatch,
+    explicit_nulls: bool,
+    timestamp_format: TimestampFormat,
+) -> Result<Vec<Vec<u8>>, ArrowError> {
+    let array  = StructArray::from(batch.clone());
+    let mut encoder = make_encoder(&array, &HashMap::new(), &EncoderOptions {
+        explicit_nulls,
+        timestamp_format,
+    })?;
+
+    let mut results = Vec::with_capacity(batch.num_rows());
+    for idx in 0..array.len() {
+        let mut buffer = Vec::with_capacity(8);
+        encoder.encode(idx, &mut buffer);
+        if !buffer.is_empty() {
+            results.push(buffer);
+        }
+    }
+
+    Ok(results)
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::fs::{read_to_string, File};

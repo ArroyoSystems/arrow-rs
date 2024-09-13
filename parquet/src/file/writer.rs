@@ -292,7 +292,7 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     /// Attempting to write after calling finish will result in an error
     pub fn finish(&mut self) -> Result<parquet::FileMetaData> {
         self.assert_previous_writer_closed()?;
-        let metadata = self.write_metadata()?;
+        let metadata = self.write_metadata(true)?;
         self.buf.flush()?;
         Ok(metadata)
     }
@@ -319,9 +319,11 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     }
 
     /// Assembles and writes metadata at the end of the file.
-    fn write_metadata(&mut self) -> Result<parquet::FileMetaData> {
-        self.finished = true;
-
+    fn write_metadata(&mut self, finish: bool) -> Result<parquet::FileMetaData> {
+        if finish {
+            self.finished = true;
+        }
+        
         // write out any remaining bloom filters after all row groups
         for row_group in &mut self.row_groups {
             write_bloom_filters(&mut self.buf, &mut self.bloom_filters, row_group)?;
@@ -421,7 +423,7 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     /// Writes the file footer and returns the underlying writer.
     pub fn into_inner(mut self) -> Result<W> {
         self.assert_previous_writer_closed()?;
-        let _ = self.write_metadata()?;
+        let _ = self.write_metadata(true)?;
 
         self.buf.into_inner()
     }
@@ -442,10 +444,10 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         self.buf.flush()?;
         let start_pos = self.buf.bytes_written();
         // swap the writer to a byte array writer so we can write the trailing bytes.
-        let mut writer = TrackedWrite::new( target);
+        let mut writer = TrackedWrite::new(target);
         writer.bytes_written = start_pos;
         std::mem::swap(&mut self.buf, &mut writer);
-        self.write_metadata()?;
+        self.write_metadata(false)?;
         // swap back to the original writer
         std::mem::swap(&mut self.buf, &mut writer);
         Ok(writer.into_inner()?)

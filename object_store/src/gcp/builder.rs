@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 use super::credential::{AuthorizedUserSigningCredentials, InstanceSigningCredentialProvider};
@@ -460,7 +461,7 @@ impl GoogleCloudStorageBuilder {
                 credentials.token_provider()?,
                 self.client_options.client()?,
                 self.retry_config.clone(),
-            )) as _
+            ).with_min_ttl(Duration::from_secs(30))) as _
         } else if let Some(credentials) = application_default_credentials.clone() {
             match credentials {
                 ApplicationDefaultCredentials::AuthorizedUser(token) => {
@@ -475,7 +476,7 @@ impl GoogleCloudStorageBuilder {
                         token.token_provider()?,
                         self.client_options.client()?,
                         self.retry_config.clone(),
-                    )) as _
+                    ).with_min_ttl(Duration::from_secs(30))) as _
                 }
             }
         } else {
@@ -483,7 +484,7 @@ impl GoogleCloudStorageBuilder {
                 InstanceCredentialProvider::default(),
                 self.client_options.metadata_client()?,
                 self.retry_config.clone(),
-            )) as _
+            ).with_min_ttl(Duration::from_secs(30))) as _
         };
 
         let signing_credentials = if let Some(signing_credentials) = self.signing_credentials {

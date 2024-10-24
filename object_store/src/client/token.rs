@@ -18,6 +18,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use tracing::warn;
 
 /// A temporary authentication token with an associated expiry
 #[derive(Debug, Clone)]
@@ -73,6 +74,13 @@ impl<T: Clone + Send> TokenCache<T> {
 
         let cached = f().await?;
         let token = cached.token.clone();
+        
+        if let Some(ttl) = cached.expiry {
+            if ttl.checked_duration_since(now).unwrap_or_default() > self.min_ttl {
+                warn!("Got back a soon-to-expire token: {:?}", cached.expiry);
+            }
+        }
+        
         *locked = Some(cached);
 
         Ok(token)

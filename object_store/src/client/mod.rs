@@ -507,6 +507,7 @@ impl ClientOptions {
         self.clone()
             .with_allow_http(true)
             .with_connect_timeout(Duration::from_secs(1))
+            .with_timeout(Duration::from_secs(5))
             .client()
     }
 

@@ -531,6 +531,9 @@ pub use client::{
     CredentialProvider, StaticCredentialProvider,
 };
 
+#[cfg(any(feature = "aws", feature = "gcp"))]
+pub use client::token::{TemporaryToken, TokenCache};
+
 #[cfg(feature = "cloud")]
 mod config;
 

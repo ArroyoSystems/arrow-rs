@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 
 /// A temporary authentication token with an associated expiry
 #[derive(Debug, Clone)]
-pub(crate) struct TemporaryToken<T> {
+pub struct TemporaryToken<T> {
     /// The temporary credential
     pub token: T,
     /// The instant at which this credential is no longer valid
@@ -32,7 +32,7 @@ pub(crate) struct TemporaryToken<T> {
 /// Provides [`TokenCache::get_or_insert_with`] which can be used to cache a
 /// [`TemporaryToken`] based on its expiry
 #[derive(Debug)]
-pub(crate) struct TokenCache<T> {
+pub struct TokenCache<T> {
     cache: Mutex<Option<(TemporaryToken<T>, Instant)>>,
     min_ttl: Duration,
     fetch_backoff: Duration,
@@ -53,11 +53,12 @@ impl<T> Default for TokenCache<T> {
 impl<T: Clone + Send> TokenCache<T> {
     /// Override the minimum remaining TTL for a cached token to be used
     #[cfg(any(feature = "aws", feature = "gcp"))]
-    pub(crate) fn with_min_ttl(self, min_ttl: Duration) -> Self {
+    pub fn with_min_ttl(self, min_ttl: Duration) -> Self {
         Self { min_ttl, ..self }
     }
 
-    pub(crate) async fn get_or_insert_with<F, Fut, E>(&self, f: F) -> Result<T, E>
+    /// Get or insert a token into the cache
+    pub async fn get_or_insert_with<F, Fut, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Result<TemporaryToken<T>, E>> + Send,

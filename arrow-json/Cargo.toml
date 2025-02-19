@@ -47,6 +47,8 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 chrono = { workspace = true }
 lexical-core = { version = "1.0", default-features = false}
 base64 = "0.22.1"
+memchr = "2.7.4"
+simdutf8 = "0.1.5"
 
 [dev-dependencies]
 tempfile = "3.3"

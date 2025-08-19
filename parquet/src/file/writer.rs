@@ -323,7 +323,7 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         if finish {
             self.finished = true;
         }
-        
+
         // write out any remaining bloom filters after all row groups
         for row_group in &mut self.row_groups {
             write_bloom_filters(&mut self.buf, &mut self.bloom_filters, row_group)?;
@@ -428,7 +428,6 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         self.buf.into_inner()
     }
 
-
     /// Returns the number of bytes written to this instance
     pub fn bytes_written(&self) -> usize {
         self.buf.bytes_written()
@@ -439,18 +438,21 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     pub(crate) fn file_encryptor(&self) -> Option<Arc<FileEncryptor>> {
         self.file_encryptor.clone()
     }
-    
-    pub(crate) fn write_trailing_bytes(&mut self, target: W) -> Result<W> {
+
+    pub(crate) fn write_trailing_bytes(
+        &mut self,
+        target: W,
+    ) -> Result<(W, crate::format::FileMetaData)> {
         self.buf.flush()?;
         let start_pos = self.buf.bytes_written();
         // swap the writer to a byte array writer so we can write the trailing bytes.
         let mut writer = TrackedWrite::new(target);
         writer.bytes_written = start_pos;
         std::mem::swap(&mut self.buf, &mut writer);
-        self.write_metadata(false)?;
+        let metadata = self.write_metadata(false)?;
         // swap back to the original writer
         std::mem::swap(&mut self.buf, &mut writer);
-        Ok(writer.into_inner()?)
+        Ok((writer.into_inner()?, metadata))
     }
 }
 

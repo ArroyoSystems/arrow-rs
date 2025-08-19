@@ -366,7 +366,7 @@ impl<W: Write + Send> ArrowWriter<W> {
     }
 
     /// Write the trailer for this parquet file to the provided Writer
-    pub fn get_trailing_bytes(&mut self, target: W) -> Result<W> {
+    pub fn get_trailing_bytes(&mut self, target: W) -> Result<(W, crate::format::FileMetaData)> {
         self.writer.write_trailing_bytes(target)
     }
 }

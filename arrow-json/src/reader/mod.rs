@@ -141,16 +141,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::Serialize;
 
-use arrow_array::timezone::Tz;
-use arrow_array::types::*;
-use arrow_array::{
-    downcast_integer, make_array, BooleanArray, RecordBatch, RecordBatchReader, StringArray,
-    StructArray,
-};
-use arrow_data::ArrayData;
-use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
-pub use schema::*;
-
+use crate::reader::binary_array::BinaryArrayDecoder;
 use crate::reader::boolean_array::BooleanArrayDecoder;
 use crate::reader::decimal_array::DecimalArrayDecoder;
 use crate::reader::json_array::JsonArrayDecoder;
@@ -163,7 +154,17 @@ use crate::reader::string_view_array::StringViewArrayDecoder;
 use crate::reader::struct_array::StructArrayDecoder;
 use crate::reader::tape::{Tape, TapeDecoder};
 use crate::reader::timestamp_array::TimestampArrayDecoder;
+use arrow_array::timezone::Tz;
+use arrow_array::types::*;
+use arrow_array::{
+    downcast_integer, make_array, BooleanArray, RecordBatch, RecordBatchReader, StringArray,
+    StructArray,
+};
+use arrow_data::ArrayData;
+use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
+pub use schema::*;
 
+mod binary_array;
 mod boolean_array;
 mod decimal_array;
 mod json_array;
@@ -853,8 +854,10 @@ fn make_decoder(
                Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive, is_nullable)))
             }
         },
-        DataType::Binary | DataType::LargeBinary | DataType::FixedSizeBinary(_) => {
-            Err(ArrowError::JsonError(format!("{data_type} is not supported by JSON")))
+        DataType::Binary => Ok(Box::new(BinaryArrayDecoder::<i32>::new(is_nullable))),
+        DataType::LargeBinary => Ok(Box::new(BinaryArrayDecoder::<i64>::new(is_nullable))),
+        DataType::FixedSizeBinary(_) => {
+            Err(ArrowError::JsonError("FixedSizeBinary is not supported by JSON".to_string()))
         }
         DataType::Map(_, _) => Ok(Box::new(MapArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode)?)),
         d => Err(ArrowError::NotYetImplemented(format!("Support for {d} in JSON reader")))
@@ -3075,5 +3078,59 @@ mod tests {
         assert_eq!(bad.value(2), j4);
         assert_eq!(bad.value(3), j6);
         assert_eq!(bad.value(4), j7);
+    }
+
+    #[test]
+    fn test_binary_deserialization() {
+        let buf = r#"
+        {"a": "aGVsbG8=", "b": "MTIzMTIz"}
+        {"b": "AAECAwQ=", "a": null}
+        "#;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Binary, true),
+            Field::new("b", DataType::LargeBinary, true),
+        ]));
+
+        let batches = do_read(buf, 1024, false, false, schema);
+        assert_eq!(batches.len(), 1);
+
+        let col1 = batches[0].column(0).as_binary::<i32>();
+        assert_eq!(col1.null_count(), 1);
+        assert_eq!(col1.value(0), b"hello");
+        assert!(col1.is_null(1));
+
+        let col2 = batches[0].column(1).as_binary::<i64>();
+        assert_eq!(col2.null_count(), 0);
+        assert_eq!(col2.value(0), b"123123");
+        assert_eq!(col2.value(1), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_invalid_base64() {
+        let j1 = r#"{"a":"invalid base64"}"#;
+        let j2 = r#"{"a":"AAECAwQ="}"#;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Binary, false)]));
+
+        // allow_bad_data
+        let mut decoder = ReaderBuilder::new(schema.clone())
+            .with_batch_size(10)
+            .with_coerce_primitive(false)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(j1.as_bytes()).unwrap();
+        decoder.decode(j2.as_bytes()).unwrap();
+
+        let (good, mask, bad) = decoder.flush_with_bad_data().unwrap().unwrap();
+        assert_eq!(mask, vec![false, true].into());
+
+        assert_eq!(good.num_rows(), 1);
+        assert_eq!(good.column(0).as_binary::<i32>().value(0), [0, 1, 2, 3, 4]);
+
+        let bad = bad.unwrap();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad.value(0), j1);
     }
 }

@@ -2966,6 +2966,54 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_raw_json_edge_cases() {
+        fn assert_case(value_src: &str) {
+            let json_content = format!(r#"{{"value": {}}}"#, value_src);
+
+            let mut meta = HashMap::new();
+            meta.insert(
+                "ARROW:extension:name".to_string(),
+                "arroyo.json".to_string(),
+            );
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false,
+            )
+            .with_metadata(meta)]));
+
+            let batches = do_read(&json_content, 1024, false, false, schema);
+            assert_eq!(batches.len(), 1);
+            let got = batches[0].column(0).as_string::<i32>().value(0);
+
+            let expected = serde_json::to_string(
+                &serde_json::from_str::<serde_json::Value>(value_src).unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(got, expected, "case: {}", value_src);
+        }
+
+        assert_case(r#""hello\"""#);
+        assert_case(r#""a\\\"b""#);
+        assert_case(r#""trailing backslash \\""#);
+        assert_case(r#""line\nbreak\tand\rcarriage\bback\fform""#);
+        assert_case(r#""null byte \u0000 inside""#);
+        assert_case(r#""\u0041\u00DF\u6771\uD83D\uDE00""#);
+        assert_case(r#""http:\/\/example.com\/x""#);
+        assert_case(r#""""#);
+        assert_case("null");
+        assert_case("true");
+        assert_case("false");
+        assert_case("0");
+        assert_case("3.1415");
+        assert_case("1e-9");
+        assert_case("9007199254740993"); // > 2^53 to catch large integer text
+        assert_case(r#"[1, "a\"b", {"x":"\n","y":"\\","z":"\uD83D\uDE00"}]"#);
+        assert_case("{  \"a\"  : [ 1 , 2 , { \"k\" : \"v\\\"\" } ] }");
+    }
+
+    #[test]
     fn test_deserialize_nullable_raw_json() {
         let json_content = r#"{
           "a": 5,
@@ -2980,8 +3028,9 @@ mod tests {
         );
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int64, false),
-            Field::new("b", DataType::Utf8, true).with_metadata(meta),
+            Field::new("b", DataType::Utf8, true).with_metadata(meta.clone()),
             Field::new("c", DataType::Int64, false),
+            Field::new("d", DataType::Utf8, true).with_metadata(meta),
         ]));
 
         let batches = do_read(json_content, 1024, false, false, schema);
@@ -2992,19 +3041,22 @@ mod tests {
             .columns()
             .get(1)
             .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .nulls()
-            .unwrap()
-            .inner()
+            .as_string::<i32>()
             .value(0);
 
         let c = batches[0].column(2).as_primitive::<Int64Type>().value(0);
 
+        let d = batches[0]
+            .columns()
+            .get(3)
+            .unwrap()
+            .as_string::<i32>()
+            .value(0);
+
         assert_eq!(a, 5);
-        assert_eq!(b, false);
+        assert_eq!(b, "null");
         assert_eq!(c, 10);
+        assert_eq!(d, "null");
     }
 
     #[test]

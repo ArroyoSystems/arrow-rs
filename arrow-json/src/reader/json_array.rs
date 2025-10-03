@@ -6,7 +6,29 @@ use arrow_data::ArrayData;
 use arrow_schema::ArrowError;
 
 pub struct JsonArrayDecoder {
+    // TODO: in the future, we may want a way to distinguish between a literal null value and absent
+    //  fields, however this likely requires changing the tape representation to record that
+    #[allow(unused)]
     is_nullable: bool,
+}
+
+fn push_json_escaped(dst: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => dst.push_str("\\\""),
+            '\\' => dst.push_str("\\\\"),
+            '\u{08}' => dst.push_str("\\b"),
+            '\u{0C}' => dst.push_str("\\f"),
+            '\n' => dst.push_str("\\n"),
+            '\r' => dst.push_str("\\r"),
+            '\t' => dst.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(dst, "\\u{:04X}", c as u32);
+            }
+            c => dst.push(c),
+        }
+    }
 }
 
 impl JsonArrayDecoder {
@@ -51,7 +73,7 @@ impl JsonArrayDecoder {
             }
             TapeElement::String(idx) => {
                 s.push('"');
-                s.push_str(tape.get_string(idx));
+                push_json_escaped(s, tape.get_string(idx));
                 s.push('"');
             }
             TapeElement::Number(idx) => s.push_str(tape.get_string(idx)),
@@ -77,12 +99,6 @@ impl ArrayDecoder for JsonArrayDecoder {
 
         for p in pos {
             let mut s = String::with_capacity(32);
-            if self.is_nullable {
-                if matches!(tape.get(*p), TapeElement::Null) {
-                    builder.append_null();
-                    continue;
-                }
-            }
             self.decode_int(&mut s, tape, *p)?;
             builder.append_value(s);
         }
@@ -90,10 +106,7 @@ impl ArrayDecoder for JsonArrayDecoder {
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
-            _ => true,
-        }
+    fn validate_row(&self, _: &Tape<'_>, _: u32) -> bool {
+        true
     }
 }

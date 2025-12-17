@@ -16,18 +16,21 @@
 // under the License.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use arrow_array::builder::PrimitiveBuilder;
 use arrow_array::types::DecimalType;
 use arrow_array::Array;
 use arrow_cast::parse::parse_decimal;
 use arrow_data::ArrayData;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 
 pub struct DecimalArrayDecoder<D: DecimalType> {
+    data_type: Arc<DataType>,
     precision: u8,
     scale: i8,
     is_nullable: bool,
@@ -38,6 +41,7 @@ pub struct DecimalArrayDecoder<D: DecimalType> {
 impl<D: DecimalType> DecimalArrayDecoder<D> {
     pub fn new(precision: u8, scale: i8, is_nullable: bool) -> Self {
         Self {
+            data_type: Arc::new(D::TYPE_CONSTRUCTOR(precision, scale)),
             precision,
             scale,
             is_nullable,
@@ -102,18 +106,36 @@ where
             .into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
             TapeElement::String(idx) => {
                 let s = tape.get_string(idx);
-                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+                if parse_decimal::<D>(s, self.precision, self.scale).is_ok() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);
-                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+                if parse_decimal::<D>(s, self.precision, self.scale).is_ok() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
-            _ => false,
-        }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

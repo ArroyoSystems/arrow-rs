@@ -15,21 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use arrow_array::builder::BooleanBuilder;
 use arrow_array::Array;
 use arrow_data::ArrayData;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 
 pub struct BooleanArrayDecoder {
+    data_type: Arc<DataType>,
     is_nullable: bool,
 }
 
 impl BooleanArrayDecoder {
     pub fn new(is_nullable: bool) -> Self {
-        Self { is_nullable }
+        Self {
+            data_type: Arc::new(DataType::Boolean),
+            is_nullable,
+        }
     }
 }
 
@@ -48,11 +55,23 @@ impl ArrayDecoder for BooleanArrayDecoder {
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
-            TapeElement::True | TapeElement::False => true,
-            _ => false,
-        }
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::True | TapeElement::False => return Ok(()),
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

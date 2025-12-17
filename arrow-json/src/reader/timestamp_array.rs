@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use chrono::TimeZone;
 use std::marker::PhantomData;
 
@@ -26,11 +28,12 @@ use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, TimeUnit};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 
 /// A specialized [`ArrayDecoder`] for timestamps
 pub struct TimestampArrayDecoder<P: ArrowTimestampType, Tz: TimeZone> {
-    data_type: DataType,
+    data_type: Arc<DataType>,
     timezone: Tz,
     is_nullable: bool,
     // Invariant and Send
@@ -40,7 +43,7 @@ pub struct TimestampArrayDecoder<P: ArrowTimestampType, Tz: TimeZone> {
 impl<P: ArrowTimestampType, Tz: TimeZone> TimestampArrayDecoder<P, Tz> {
     pub fn new(data_type: DataType, timezone: Tz, is_nullable: bool) -> Self {
         Self {
-            data_type,
+            data_type: Arc::new(data_type),
             timezone,
             is_nullable,
             phantom: Default::default(),
@@ -54,8 +57,8 @@ where
     Tz: TimeZone + Send,
 {
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
-        let mut builder =
-            PrimitiveBuilder::<P>::with_capacity(pos.len()).with_data_type(self.data_type.clone());
+        let mut builder = PrimitiveBuilder::<P>::with_capacity(pos.len())
+            .with_data_type((*self.data_type).clone());
 
         for p in pos {
             match tape.get(*p) {
@@ -110,29 +113,51 @@ where
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
             TapeElement::String(idx) => {
                 let s = tape.get_string(idx);
-                if let Ok(d) = string_to_datetime(&self.timezone, s) {
+                let valid = if let Ok(d) = string_to_datetime(&self.timezone, s) {
                     match P::UNIT {
                         TimeUnit::Nanosecond => d.timestamp_nanos_opt().is_some(),
                         _ => true,
                     }
                 } else {
                     false
+                };
+
+                if valid {
+                    return Ok(());
                 }
+                FailureKind::ParseFailure
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);
                 let b = s.as_bytes();
-                lexical_core::parse::<i64>(b)
+                let valid = lexical_core::parse::<i64>(b)
                     .or_else(|_| lexical_core::parse::<f64>(b).map(|x| x as i64))
-                    .is_ok()
+                    .is_ok();
+
+                if valid {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
-            TapeElement::I32(_) | TapeElement::I64(_) => true,
-            _ => false,
-        }
+            TapeElement::I32(_) | TapeElement::I64(_) => return Ok(()),
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

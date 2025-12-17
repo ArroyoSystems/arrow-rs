@@ -15,7 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{make_decoder, ArrayDecoder};
 use crate::StructMode;
 use arrow_array::builder::{BooleanBufferBuilder, BufferBuilder};
@@ -26,7 +29,7 @@ use arrow_schema::{ArrowError, DataType};
 use std::marker::PhantomData;
 
 pub struct ListArrayDecoder<O> {
-    data_type: DataType,
+    data_type: Arc<DataType>,
     decoder: Box<dyn ArrayDecoder>,
     phantom: PhantomData<O>,
     is_nullable: bool,
@@ -55,7 +58,7 @@ impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
         )?;
 
         Ok(Self {
-            data_type,
+            data_type: Arc::new(data_type),
             decoder,
             phantom: Default::default(),
             is_nullable,
@@ -104,7 +107,7 @@ impl<O: OffsetSizeTrait> ArrayDecoder for ListArrayDecoder<O> {
         let child_data = self.decoder.decode(tape, &child_pos)?;
         let nulls = nulls.as_mut().map(|x| NullBuffer::new(x.finish()));
 
-        let data = ArrayDataBuilder::new(self.data_type.clone())
+        let data = ArrayDataBuilder::new((*self.data_type).clone())
             .len(pos.len())
             .nulls(nulls)
             .add_buffer(offsets.finish())
@@ -115,28 +118,65 @@ impl<O: OffsetSizeTrait> ArrayDecoder for ListArrayDecoder<O> {
         Ok(unsafe { data.build_unchecked() })
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        let end_idx = match (tape.get(pos), self.is_nullable) {
-            (TapeElement::StartList(end_idx), _) => end_idx,
-            (TapeElement::Null, true) => {
-                return true;
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let end_idx = match tape.get(pos) {
+            TapeElement::StartList(end_idx) => end_idx,
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                } else {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             }
-            _ => return false,
+            _ => {
+                return ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    Arc::clone(&self.data_type),
+                );
+            }
         };
 
         let mut cur_idx = pos + 1;
+        let mut element_idx = 0;
         while cur_idx < end_idx {
-            if !self.decoder.validate_row(tape, cur_idx) {
-                return false;
+            match self.decoder.validate_row(tape, cur_idx, row_idx) {
+                Ok(()) => {}
+                Err(mut child_errors) => {
+                    for error in &mut child_errors {
+                        error.array_indices.push(element_idx);
+                    }
+                    return Err(child_errors);
+                }
             }
-            // Advance to next field
-            if let Ok(next) = tape.next(cur_idx, "list value") {
-                cur_idx = next;
-            } else {
-                return false;
+
+            match tape.next(cur_idx, "list value") {
+                Ok(next) => {
+                    cur_idx = next;
+                    element_idx += 1;
+                }
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        cur_idx,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             }
         }
 
-        true
+        Ok(())
     }
 }

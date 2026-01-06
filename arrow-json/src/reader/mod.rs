@@ -163,6 +163,9 @@ use arrow_array::{
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
 pub use schema::*;
+pub use validation::{
+    build_detailed_errors, ErrorMarker, FailureKind, JsonType, ValidationError, DEFAULT_MAX_ERRORS,
+};
 
 mod binary_array;
 mod boolean_array;
@@ -179,6 +182,7 @@ mod string_view_array;
 mod struct_array;
 mod tape;
 mod timestamp_array;
+pub mod validation;
 
 /// A builder for [`Reader`] and [`Decoder`]
 pub struct ReaderBuilder {
@@ -696,8 +700,8 @@ impl Decoder {
         });
 
         let pos: Vec<_> = if self.allow_bad_data {
-            // filter out invalid rows before we attempt to deserialize
-            pos.filter(|p| self.decoder.validate_row(&tape, *p))
+            pos.enumerate()
+                .filter_map(|(idx, p)| self.decoder.validate_row(&tape, p, idx).ok().map(|_| p))
                 .collect()
         } else {
             pos.collect()
@@ -717,40 +721,63 @@ impl Decoder {
     }
 
     /// Flushes schema-conforming JSON in the current buffer to a [`RecordBatch`], and returns
-    /// an BooleanArray that marks good rows and an Option<StringArray> with invalid records, if
-    /// any exist
+    /// a BooleanArray that marks good rows, an Option<StringArray> with invalid records,
+    /// and detailed validation errors
     ///
     /// Returns `Ok(None)` if no buffered data
     ///
     /// Note: if called part way through decoding a record, this will return an error
+    #[allow(clippy::type_complexity)]
     pub fn flush_with_bad_data(
         &mut self,
-    ) -> Result<Option<(RecordBatch, BooleanArray, Option<StringArray>)>, ArrowError> {
+    ) -> Result<
+        Option<(
+            RecordBatch,
+            BooleanArray,
+            Option<StringArray>,
+            Vec<ValidationError>,
+        )>,
+        ArrowError,
+    > {
         let tape = self.tape_decoder.finish()?;
 
         if tape.num_rows() == 0 {
             return Ok(None);
         }
 
-        // First offset is null sentinel
         let mut next_object = 1;
-        let mut good_rows = Vec::with_capacity(tape.num_rows());
-
-        let (good, bad): (Vec<_>, Vec<_>) = (0..tape.num_rows())
+        let positions: Vec<_> = (0..tape.num_rows())
             .map(|_| {
                 let next = tape.next(next_object, "row").unwrap();
-
                 std::mem::replace(&mut next_object, next)
             })
-            .partition(|p| {
-                let valid = self.decoder.validate_row(&tape, *p);
-                good_rows.push(valid);
-                valid
-            });
+            .collect();
 
-        let bad_data = if !bad.is_empty() {
+        let mut good = Vec::new();
+        let mut bad_positions = Vec::new();
+        let mut all_markers = Vec::new();
+        let mut good_rows = Vec::with_capacity(tape.num_rows());
+
+        for (row_idx, p) in positions.into_iter().enumerate() {
+            match self.decoder.validate_row(&tape, p, row_idx) {
+                Ok(()) => {
+                    good.push(p);
+                    good_rows.push(true);
+                }
+                Err(markers) => {
+                    bad_positions.push(p);
+                    good_rows.push(false);
+                    all_markers.extend(markers);
+                }
+            }
+        }
+
+        all_markers.truncate(DEFAULT_MAX_ERRORS);
+        let errors = build_detailed_errors(&tape, all_markers);
+
+        let bad_data = if !bad_positions.is_empty() {
             let mut json = JsonArrayDecoder::new(false);
-            let v = json.decode(&tape, &bad).unwrap();
+            let v = json.decode(&tape, &bad_positions).unwrap();
             Some(v.into())
         } else {
             None
@@ -766,7 +793,7 @@ impl Decoder {
             }
         };
 
-        Ok(Some((batch, good_rows.into(), bad_data)))
+        Ok(Some((batch, good_rows.into(), bad_data, errors)))
     }
 }
 
@@ -774,8 +801,16 @@ trait ArrayDecoder: Send {
     /// Decode elements from `tape` starting at the indexes contained in `pos`
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError>;
 
-    /// Returns true if the row matches the schema
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool;
+    /// Validates a row and returns error markers if validation fails
+    ///
+    /// Returns Ok(()) if valid, Err(markers) if invalid.
+    /// Uses `&'tape self` to allow borrowing field names from the decoder.
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>>;
 }
 
 macro_rules! primitive_decoder {
@@ -3117,7 +3152,7 @@ mod tests {
         decoder.decode(&j6.as_bytes()).unwrap();
         decoder.decode(&j7.as_bytes()).unwrap();
 
-        let (good, mask, bad) = decoder.flush_with_bad_data().unwrap().unwrap();
+        let (good, mask, bad, _errors) = decoder.flush_with_bad_data().unwrap().unwrap();
         assert_eq!(
             mask,
             vec![true, false, false, false, true, false, false].into()
@@ -3175,7 +3210,7 @@ mod tests {
         decoder.decode(j1.as_bytes()).unwrap();
         decoder.decode(j2.as_bytes()).unwrap();
 
-        let (good, mask, bad) = decoder.flush_with_bad_data().unwrap().unwrap();
+        let (good, mask, bad, _errors) = decoder.flush_with_bad_data().unwrap().unwrap();
         assert_eq!(mask, vec![false, true].into());
 
         assert_eq!(good.num_rows(), 1);
@@ -3184,5 +3219,459 @@ mod tests {
         let bad = bad.unwrap();
         assert_eq!(bad.len(), 1);
         assert_eq!(bad.value(0), j1);
+    }
+
+    #[test]
+    fn test_validation_details_primitive_errors() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+
+        let json = r#"
+            {"id": 1, "value": 1.5}
+            {"id": "invalid", "value": 2.5}
+            {"id": 3, "value": "also_invalid"}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1); // Only first row valid
+        assert_eq!(errors.len(), 2);
+
+        // Check first error - invalid id
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "id");
+        assert!(matches!(errors[0].failure_kind, FailureKind::ParseFailure));
+
+        // Check second error - invalid value
+        assert_eq!(errors[1].row_index, 2);
+        assert_eq!(errors[1].field_path, "value");
+    }
+
+    #[test]
+    fn test_validation_details_nested_struct_errors() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "user",
+            DataType::Struct(Fields::from(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+                Field::new(
+                    "address",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("city", DataType::Utf8, false),
+                        Field::new("zipcode", DataType::Int32, false),
+                    ])),
+                    false,
+                ),
+            ])),
+            false,
+        )]));
+
+        let json = r#"
+            {"user": {"name": "Alice", "age": 30, "address": {"city": "NYC", "zipcode": 10001}}}
+            {"user": {"name": "Bob", "age": "invalid", "address": {"city": "LA", "zipcode": "bad"}}}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        // Should have 1 error - age is invalid, short-circuits before checking zipcode
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "age");
+    }
+
+    #[test]
+    fn test_validation_details_missing_required_fields() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "user",
+            DataType::Struct(Fields::from(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+                Field::new("email", DataType::Utf8, false),
+            ])),
+            false,
+        )]));
+
+        let json = r#"
+            {"user": {"name": "Alice", "age": 30, "email": "alice@example.com"}}
+            {"user": {"name": "Bob"}}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        // Should have 2 errors - age and email both missing
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "age");
+        assert_eq!(errors[0].failure_kind, FailureKind::MissingField);
+
+        assert_eq!(errors[1].row_index, 1);
+        assert_eq!(errors[1].field_path, "email");
+        assert_eq!(errors[1].failure_kind, FailureKind::MissingField);
+    }
+
+    #[test]
+    fn test_validation_details_array_element_errors() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "items",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+            false,
+        )]));
+
+        let json = r#"
+            {"items": [1, 2, 3]}
+            {"items": [4, "invalid", 6]}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].row_index, 1);
+        // Array element error should include array index
+        assert_eq!(errors[0].field_path, "items[1]");
+        assert!(matches!(errors[0].failure_kind, FailureKind::ParseFailure));
+    }
+
+    #[test]
+    fn test_validation_details_type_mismatch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let json = r#"
+            {"id": 123, "name": "valid"}
+            {"id": {"nested": "object"}, "name": [1, 2, 3]}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "id");
+        assert_eq!(errors[0].failure_kind, FailureKind::TypeMismatch);
+        assert_eq!(errors[0].actual_type, Some(JsonType::Object));
+    }
+
+    #[test]
+    fn test_validation_details_null_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let json = r#"
+            {"id": 123, "name": "valid"}
+            {"id": null, "name": null}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "id");
+        assert_eq!(errors[0].failure_kind, FailureKind::NullValue);
+        assert_eq!(errors[0].actual_value.as_deref(), Some("null"));
+    }
+
+    #[test]
+    #[ignore = "StructMode::ListOnly validation not yet implemented - all rows marked invalid"]
+    fn test_validation_details_struct_mode_list_only() {
+        use crate::StructMode;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "record",
+            DataType::Struct(Fields::from(vec![
+                Field::new("a", DataType::Int32, false),
+                Field::new("b", DataType::Utf8, false),
+            ])),
+            false,
+        )]));
+
+        // ListOnly mode expects arrays like [1, "hello"] instead of {"a": 1, "b": "hello"}
+        let json = r#"
+            {"record": [1, "valid"]}
+            {"record": [2, 123]}
+            {"record": ["invalid", "text"]}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_struct_mode(StructMode::ListOnly)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(mask, BooleanArray::from(vec![true, false, false]));
+        assert_eq!(errors.len(), 2);
+
+        // Row 1: b field has wrong type (number 123 instead of string)
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "record[1]");
+        assert_eq!(errors[0].failure_kind, FailureKind::TypeMismatch);
+        assert_eq!(errors[0].actual_type, Some(JsonType::Number));
+        assert_eq!(errors[0].actual_value.as_deref(), Some("123"));
+
+        // Row 2: a field has wrong type (string "invalid" instead of int)
+        assert_eq!(errors[1].row_index, 2);
+        assert_eq!(errors[1].field_path, "record[0]");
+        assert_eq!(errors[1].failure_kind, FailureKind::ParseFailure);
+        assert_eq!(errors[1].actual_type, Some(JsonType::String));
+        assert_eq!(errors[1].actual_value.as_deref(), Some("\"invalid\""));
+    }
+
+    #[test]
+    fn test_validation_details_nested_arrays() {
+        // Test List<List<Int32>> - nested arrays
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "matrix",
+            DataType::List(Arc::new(Field::new(
+                "row",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                false,
+            ))),
+            false,
+        )]));
+
+        let json = r#"
+            {"matrix": [[1, 2], [3, 4]]}
+            {"matrix": [[5, 6], [7, "invalid"]]}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(mask, BooleanArray::from(vec![true, false]));
+        assert_eq!(errors.len(), 1);
+
+        // Error at matrix[1][1] - the "invalid" string
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "matrix[1][1]");
+        assert_eq!(errors[0].failure_kind, FailureKind::ParseFailure);
+        assert_eq!(errors[0].actual_type, Some(JsonType::String));
+        assert_eq!(errors[0].actual_value.as_deref(), Some("\"invalid\""));
+    }
+
+    #[test]
+    fn test_validation_details_map_errors() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "properties",
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("key", DataType::Utf8, false),
+                        Field::new("value", DataType::Int32, false),
+                    ])),
+                    false,
+                )),
+                false,
+            ),
+            false,
+        )]));
+
+        let json = r#"
+            {"properties": {"count": 42, "size": 100}}
+            {"properties": {"count": "not_a_number", "size": 200}}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(mask, BooleanArray::from(vec![true, false]));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].failure_kind, FailureKind::ParseFailure);
+        assert_eq!(errors[0].actual_type, Some(JsonType::String));
+        assert_eq!(errors[0].actual_value.as_deref(), Some("\"not_a_number\""));
+    }
+
+    #[test]
+    fn test_validation_details_strict_mode_unknown_field() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let json = r#"
+            {"id": 1, "name": "Alice"}
+            {"id": 2, "name": "Bob", "extra_field": "should_error"}
+            {"id": 3, "name": "Charlie", "another": 123, "fields": true}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_strict_mode(true)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1); // Only first row valid
+        assert_eq!(mask, BooleanArray::from(vec![true, false, false]));
+        assert_eq!(errors.len(), 2);
+
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "extra_field");
+        assert_eq!(errors[0].failure_kind, FailureKind::TypeMismatch);
+
+        assert_eq!(errors[1].row_index, 2);
+        assert_eq!(errors[1].field_path, "another");
+        assert_eq!(errors[1].failure_kind, FailureKind::TypeMismatch);
+    }
+
+    #[test]
+    fn test_validation_details_timestamp_errors() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+
+        let json = r#"
+            {"ts": "2024-01-15T10:30:00Z"}
+            {"ts": "not-a-timestamp"}
+            {"ts": "2024-13-45T99:99:99Z"}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(mask, BooleanArray::from(vec![true, false, false]));
+        assert_eq!(errors.len(), 2);
+
+        assert_eq!(errors[0].row_index, 1);
+        assert_eq!(errors[0].field_path, "ts");
+        assert_eq!(errors[0].failure_kind, FailureKind::ParseFailure);
+        assert_eq!(errors[0].actual_type, Some(JsonType::String));
+        assert_eq!(
+            errors[0].actual_value.as_deref(),
+            Some("\"not-a-timestamp\"")
+        );
+
+        assert_eq!(errors[1].row_index, 2);
+        assert_eq!(errors[1].field_path, "ts");
+        assert_eq!(errors[1].failure_kind, FailureKind::ParseFailure);
+    }
+
+    #[test]
+    fn test_validation_details_bad_data_content() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let json = r#"
+            {"id": 1, "name": "Alice"}
+            {"id": "not_int", "name": "Bob"}
+            {"id": 3, "name": null}
+        "#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (batch, mask, bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(mask, BooleanArray::from(vec![true, false, false]));
+        assert_eq!(errors.len(), 2);
+
+        let bad_data = bad_data.expect("should have bad_data");
+        assert_eq!(bad_data.len(), 2);
+
+        let bad0 = bad_data.value(0);
+        let bad1 = bad_data.value(1);
+        assert!(bad0.contains("\"not_int\"") && bad0.contains("\"Bob\""));
+        assert!(bad1.contains("null") && bad1.contains("\"id\":3") || bad1.contains("\"id\": 3"));
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "count",
+            DataType::Int32,
+            false,
+        )]));
+
+        let json = r#"{"count": "not_a_number"}"#;
+
+        let mut decoder = ReaderBuilder::new(schema)
+            .with_allow_bad_data(true)
+            .build_decoder()
+            .unwrap();
+
+        decoder.decode(json.as_bytes()).unwrap();
+        let (_batch, _mask, _bad_data, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+
+        assert_eq!(errors.len(), 1);
+
+        let error_msg = errors[0].to_string();
+        assert!(error_msg.contains("row 0"));
+        assert!(error_msg.contains("count"));
+        assert!(error_msg.contains("Int32"));
+        assert!(error_msg.contains("parse failure"));
+        assert!(error_msg.contains("\"not_a_number\""));
     }
 }

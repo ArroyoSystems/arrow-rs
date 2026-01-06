@@ -163,7 +163,12 @@ impl ArrayDecoder for StringViewArrayDecoder {
         Ok(array.into_data())
     }
 
-    fn validate_row(&self, _tape: &Tape<'_>, _pos: u32) -> bool {
+    fn validate_row<'tape>(
+        &'tape self,
+        _tape: &'tape Tape<'_>,
+        _pos: u32,
+        _row_idx: usize,
+    ) -> Result<(), Vec<super::ErrorMarker<'tape>>> {
         todo!("string views are not yet supported")
     }
 }

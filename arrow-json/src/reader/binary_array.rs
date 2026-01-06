@@ -15,17 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::marker::PhantomData;
+use std::sync::Arc;
+
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 use arrow_array::builder::GenericBinaryBuilder;
-use arrow_array::{Array, GenericStringArray, OffsetSizeTrait};
+use arrow_array::{Array, GenericBinaryArray, GenericStringArray, OffsetSizeTrait};
 use arrow_data::ArrayData;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use std::marker::PhantomData;
 
 pub struct BinaryArrayDecoder<O: OffsetSizeTrait> {
+    data_type: Arc<DataType>,
     is_nullable: bool,
     phantom: PhantomData<O>,
 }
@@ -33,6 +37,7 @@ pub struct BinaryArrayDecoder<O: OffsetSizeTrait> {
 impl<O: OffsetSizeTrait> BinaryArrayDecoder<O> {
     pub fn new(is_nullable: bool) -> Self {
         Self {
+            data_type: Arc::new(GenericBinaryArray::<O>::DATA_TYPE),
             is_nullable,
             phantom: Default::default(),
         }
@@ -80,11 +85,28 @@ impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::String(p) => BASE64_STANDARD.decode(&tape.get_string(p)).is_ok(),
-            TapeElement::Null => self.is_nullable,
-            _ => false,
-        }
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::String(p) => {
+                if BASE64_STANDARD.decode(tape.get_string(p)).is_ok() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
+            }
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

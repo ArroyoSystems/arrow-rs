@@ -15,13 +15,31 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 use arrow_data::{ArrayData, ArrayDataBuilder};
 use arrow_schema::{ArrowError, DataType};
 
-#[derive(Default)]
-pub struct NullArrayDecoder {}
+pub struct NullArrayDecoder {
+    data_type: Arc<DataType>,
+}
+
+impl Default for NullArrayDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NullArrayDecoder {
+    pub fn new() -> Self {
+        Self {
+            data_type: Arc::new(DataType::Null),
+        }
+    }
+}
 
 impl ArrayDecoder for NullArrayDecoder {
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
@@ -33,7 +51,17 @@ impl ArrayDecoder for NullArrayDecoder {
         ArrayDataBuilder::new(DataType::Null).len(pos.len()).build()
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        matches!(tape.get(pos), TapeElement::Null)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => return Ok(()),
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

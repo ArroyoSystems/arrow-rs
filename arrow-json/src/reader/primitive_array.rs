@@ -17,6 +17,7 @@
 
 use num::NumCast;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use arrow_array::builder::PrimitiveBuilder;
 use arrow_array::{Array, ArrowPrimitiveType};
@@ -26,6 +27,7 @@ use arrow_schema::{ArrowError, DataType};
 use half::f16;
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::ArrayDecoder;
 
 /// A trait for JSON-specific primitive parsing logic
@@ -74,7 +76,7 @@ impl ParseJsonNumber for f64 {
 }
 
 pub struct PrimitiveArrayDecoder<P: ArrowPrimitiveType> {
-    data_type: DataType,
+    data_type: Arc<DataType>,
     is_nullable: bool,
     // Invariant and Send
     phantom: PhantomData<fn(P) -> P>,
@@ -83,7 +85,7 @@ pub struct PrimitiveArrayDecoder<P: ArrowPrimitiveType> {
 impl<P: ArrowPrimitiveType> PrimitiveArrayDecoder<P> {
     pub fn new(data_type: DataType, is_nullable: bool) -> Self {
         Self {
-            data_type,
+            data_type: Arc::new(data_type),
             is_nullable,
             phantom: Default::default(),
         }
@@ -96,8 +98,8 @@ where
     P::Native: ParseJsonNumber + NumCast,
 {
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
-        let mut builder =
-            PrimitiveBuilder::<P>::with_capacity(pos.len()).with_data_type(self.data_type.clone());
+        let mut builder = PrimitiveBuilder::<P>::with_capacity(pos.len())
+            .with_data_type((*self.data_type).clone());
         let d = &self.data_type;
 
         for p in pos {
@@ -159,33 +161,58 @@ where
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
             TapeElement::String(idx) => {
                 let s = tape.get_string(idx);
-                P::parse(s).is_some()
+                if P::parse(s).is_some() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);
                 let v: Option<<P as ArrowPrimitiveType>::Native> =
                     ParseJsonNumber::parse(s.as_bytes());
-                v.is_some()
+                if v.is_some() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::F32(v) => {
                 let v = f32::from_bits(v);
                 let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
-                v.is_some()
+                if v.is_some() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::I32(v) => {
                 let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
-                v.is_some()
+                if v.is_some() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::F64(high) => match tape.get(pos + 1) {
                 TapeElement::F32(low) => {
                     let v = f64::from_bits((high as u64) << 32 | low as u64);
                     let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
-                    v.is_some()
+                    if v.is_some() {
+                        return Ok(());
+                    }
+                    FailureKind::ParseFailure
                 }
                 _ => unreachable!(),
             },
@@ -193,11 +220,16 @@ where
                 TapeElement::I32(low) => {
                     let v = (high as i64) << 32 | (low as u32) as i64;
                     let v: Option<<P as ArrowPrimitiveType>::Native> = NumCast::from(v);
-                    v.is_some()
+                    if v.is_some() {
+                        return Ok(());
+                    }
+                    FailureKind::ParseFailure
                 }
                 _ => unreachable!(),
             },
-            _ => false,
-        }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

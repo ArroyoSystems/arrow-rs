@@ -106,7 +106,12 @@ impl ArrayDecoder for JsonArrayDecoder {
         Ok(builder.finish().into_data())
     }
 
-    fn validate_row(&self, _: &Tape<'_>, _: u32) -> bool {
-        true
+    fn validate_row<'tape>(
+        &'tape self,
+        _tape: &'tape Tape<'_>,
+        _pos: u32,
+        _row_idx: usize,
+    ) -> Result<(), Vec<super::ErrorMarker<'tape>>> {
+        Ok(())
     }
 }

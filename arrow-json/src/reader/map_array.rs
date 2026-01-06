@@ -15,7 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{make_decoder, ArrayDecoder};
 use crate::StructMode;
 use arrow_array::builder::{BooleanBufferBuilder, BufferBuilder};
@@ -25,7 +28,7 @@ use arrow_data::{ArrayData, ArrayDataBuilder};
 use arrow_schema::{ArrowError, DataType};
 
 pub struct MapArrayDecoder {
-    data_type: DataType,
+    data_type: Arc<DataType>,
     keys: Box<dyn ArrayDecoder>,
     values: Box<dyn ArrayDecoder>,
     is_nullable: bool,
@@ -74,7 +77,7 @@ impl MapArrayDecoder {
         )?;
 
         Ok(Self {
-            data_type,
+            data_type: Arc::new(data_type),
             keys,
             values,
             is_nullable,
@@ -84,7 +87,7 @@ impl MapArrayDecoder {
 
 impl ArrayDecoder for MapArrayDecoder {
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
-        let s = match &self.data_type {
+        let s = match &*self.data_type {
             DataType::Map(f, _) => match f.data_type() {
                 s @ DataType::Struct(_) => s,
                 _ => unreachable!(),
@@ -147,7 +150,7 @@ impl ArrayDecoder for MapArrayDecoder {
 
         let nulls = nulls.as_mut().map(|x| NullBuffer::new(x.finish()));
 
-        let builder = ArrayDataBuilder::new(self.data_type.clone())
+        let builder = ArrayDataBuilder::new((*self.data_type).clone())
             .len(pos.len())
             .buffers(vec![offsets.finish()])
             .nulls(nulls)
@@ -158,33 +161,67 @@ impl ArrayDecoder for MapArrayDecoder {
         Ok(unsafe { builder.build_unchecked() })
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
         let end_idx = match tape.get(pos) {
             TapeElement::StartObject(end_idx) => end_idx,
             TapeElement::Null => {
-                return self.is_nullable;
+                if self.is_nullable {
+                    return Ok(());
+                } else {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             }
-            _ => return false,
+            _ => {
+                return ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    Arc::clone(&self.data_type),
+                );
+            }
         };
 
         let mut cur_idx = pos + 1;
         while cur_idx < end_idx {
             let key = cur_idx;
-            let Ok(value) = tape.next(key, "map key") else {
-                return false;
+            let value = match tape.next(key, "map key") {
+                Ok(v) => v,
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        key,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             };
 
-            if let Ok(i) = tape.next(value, "map value") {
-                cur_idx = i;
-            } else {
-                return false;
-            }
+            cur_idx = match tape.next(value, "map value") {
+                Ok(i) => i,
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        value,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
+            };
 
-            if !(self.keys.validate_row(tape, key) && self.values.validate_row(tape, value)) {
-                return false;
-            }
+            self.keys.validate_row(tape, key, row_idx)?;
+            self.values.validate_row(tape, value, row_idx)?;
         }
 
-        true
+        Ok(())
     }
 }

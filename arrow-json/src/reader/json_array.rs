@@ -10,6 +10,9 @@ pub struct JsonArrayDecoder {
     //  fields, however this likely requires changing the tape representation to record that
     #[allow(unused)]
     is_nullable: bool,
+    /// When true, top-level JSON null values produce Arrow nulls instead of
+    /// the non-null string `"null"`.
+    preserve_nulls: bool,
 }
 
 fn push_json_escaped(dst: &mut String, s: &str) {
@@ -32,8 +35,8 @@ fn push_json_escaped(dst: &mut String, s: &str) {
 }
 
 impl JsonArrayDecoder {
-    pub fn new(is_nullable: bool) -> Self {
-        Self { is_nullable }
+    pub fn new(is_nullable: bool, preserve_nulls: bool) -> Self {
+        Self { is_nullable, preserve_nulls }
     }
 
     fn decode_int(&self, s: &mut String, tape: &Tape<'_>, pos: u32) -> Result<(), ArrowError> {
@@ -98,9 +101,13 @@ impl ArrayDecoder for JsonArrayDecoder {
         let mut builder = GenericStringBuilder::<i32>::new();
 
         for p in pos {
-            let mut s = String::with_capacity(32);
-            self.decode_int(&mut s, tape, *p)?;
-            builder.append_value(s);
+            if self.preserve_nulls && matches!(tape.get(*p), TapeElement::Null) {
+                builder.append_null();
+            } else {
+                let mut s = String::with_capacity(32);
+                self.decode_int(&mut s, tape, *p)?;
+                builder.append_value(s);
+            }
         }
 
         Ok(builder.finish().into_data())

@@ -40,6 +40,7 @@ impl StructArrayDecoder {
         strict_mode: bool,
         is_nullable: bool,
         struct_mode: StructMode,
+        preserve_nulls: bool,
     ) -> Result<Self, ArrowError> {
         let decoders = struct_fields(&data_type)
             .iter()
@@ -55,6 +56,7 @@ impl StructArrayDecoder {
                     strict_mode,
                     nullable,
                     struct_mode,
+                    preserve_nulls,
                 )
             })
             .collect::<Result<Vec<_>, ArrowError>>()?;

@@ -193,6 +193,7 @@ pub struct ReaderBuilder {
     struct_mode: StructMode,
     limit_to_batch_size: bool,
     allow_bad_data: bool,
+    preserve_nulls: bool,
 
     schema: SchemaRef,
 }
@@ -215,6 +216,7 @@ impl ReaderBuilder {
             struct_mode: Default::default(),
             allow_bad_data: false,
             limit_to_batch_size: true,
+            preserve_nulls: false,
             schema,
         }
     }
@@ -258,6 +260,7 @@ impl ReaderBuilder {
             struct_mode: Default::default(),
             allow_bad_data: false,
             limit_to_batch_size: true,
+            preserve_nulls: false,
             schema: Arc::new(Schema::new([field.into()])),
         }
     }
@@ -317,6 +320,20 @@ impl ReaderBuilder {
         }
     }
 
+    /// Sets whether top-level JSON null values in `arroyo.json` extension
+    /// fields should produce Arrow nulls instead of the string `"null"`.
+    ///
+    /// By default (`false`), a JSON null in an `arroyo.json` field is stored
+    /// as the non-null string `"null"`. When set to `true`, it is stored as
+    /// a proper Arrow null, allowing downstream null-aware operations (IS NULL,
+    /// COALESCE, NDJSON writers) to handle it correctly.
+    pub fn with_preserve_nulls(self, preserve_nulls: bool) -> Self {
+        Self {
+            preserve_nulls,
+            ..self
+        }
+    }
+
     /// Create a [`Reader`] with the provided [`BufRead`]
     pub fn build<R: BufRead>(self, reader: R) -> Result<Reader<R>, ArrowError> {
         Ok(Reader {
@@ -350,6 +367,7 @@ impl ReaderBuilder {
             self.strict_mode,
             nullable,
             self.struct_mode,
+            self.preserve_nulls,
         )?;
 
         let num_fields = self.schema.flattened_fields().len();
@@ -776,7 +794,7 @@ impl Decoder {
         let errors = build_detailed_errors(&tape, all_markers);
 
         let bad_data = if !bad_positions.is_empty() {
-            let mut json = JsonArrayDecoder::new(false);
+            let mut json = JsonArrayDecoder::new(false, false);
             let v = json.decode(&tape, &bad_positions).unwrap();
             Some(v.into())
         } else {
@@ -829,6 +847,7 @@ fn make_decoder(
     strict_mode: bool,
     is_nullable: bool,
     struct_mode: StructMode,
+    preserve_nulls: bool,
 ) -> Result<Box<dyn ArrayDecoder>, ArrowError> {
     downcast_integer! {
         data_type => (primitive_decoder, data_type, is_nullable),
@@ -866,9 +885,9 @@ fn make_decoder(
         },
         DataType::Utf8View => Ok(Box::new(StringViewArrayDecoder::new(coerce_primitive))),
         DataType::LargeUtf8 => Ok(Box::new(StringArrayDecoder::<i64>::new(coerce_primitive, is_nullable))),
-        DataType::List(_) => Ok(Box::new(ListArrayDecoder::<i32>::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode)?)),
-        DataType::LargeList(_) => Ok(Box::new(ListArrayDecoder::<i64>::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode)?)),
-        DataType::Struct(_) => Ok(Box::new(StructArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode)?)),
+        DataType::List(_) => Ok(Box::new(ListArrayDecoder::<i32>::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode, preserve_nulls)?)),
+        DataType::LargeList(_) => Ok(Box::new(ListArrayDecoder::<i64>::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode, preserve_nulls)?)),
+        DataType::Struct(_) => Ok(Box::new(StructArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode, preserve_nulls)?)),
         DataType::Date32 => primitive_decoder!(Date32Type, data_type, is_nullable),
         DataType::Date64 => primitive_decoder!(Date64Type, data_type, is_nullable),
         DataType::Time32(TimeUnit::Second) => primitive_decoder!(Time32SecondType, data_type, is_nullable),
@@ -884,7 +903,7 @@ fn make_decoder(
         DataType::Boolean => Ok(Box::new(BooleanArrayDecoder::new(is_nullable))),
         DataType::Utf8 => {
             if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
-              Ok(Box::new(JsonArrayDecoder::new(is_nullable)))
+              Ok(Box::new(JsonArrayDecoder::new(is_nullable, preserve_nulls)))
             } else {
                Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive, is_nullable)))
             }
@@ -894,7 +913,7 @@ fn make_decoder(
         DataType::FixedSizeBinary(_) => {
             Err(ArrowError::JsonError("FixedSizeBinary is not supported by JSON".to_string()))
         }
-        DataType::Map(_, _) => Ok(Box::new(MapArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode)?)),
+        DataType::Map(_, _) => Ok(Box::new(MapArrayDecoder::new(data_type, coerce_primitive, strict_mode, is_nullable, struct_mode, preserve_nulls)?)),
         d => Err(ArrowError::NotYetImplemented(format!("Support for {d} in JSON reader")))
     }
 }
@@ -3092,6 +3111,81 @@ mod tests {
         assert_eq!(b, "null");
         assert_eq!(c, 10);
         assert_eq!(d, "null");
+    }
+
+    #[test]
+    fn test_preserve_nulls_produces_arrow_null() {
+        // When `with_preserve_nulls(true)` is set, top-level JSON null values
+        // in arroyo.json fields must produce Arrow nulls, not the string "null".
+        let json_content = concat!(
+            r#"{"a": 5, "b": {"key":"val"}, "c": 10}"#, "\n",
+            r#"{"a": 6, "b": null, "c": 20}"#, "\n",
+            r#"{"a": 7, "c": 30}"#, "\n",
+        );
+
+        let mut meta = HashMap::new();
+        meta.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, true).with_metadata(meta),
+            Field::new("c", DataType::Int64, false),
+        ]));
+
+        let batches: Vec<RecordBatch> = ReaderBuilder::new(schema)
+            .with_batch_size(1024)
+            .with_preserve_nulls(true)
+            .build(Cursor::new(json_content.as_bytes()))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let b = batches[0].column(1).as_string::<i32>();
+
+        // Row 0: object value — non-null with serialized JSON
+        assert!(!b.is_null(0));
+        assert_eq!(b.value(0), r#"{"key":"val"}"#);
+
+        // Row 1: explicit JSON null — must be Arrow null
+        assert!(b.is_null(1), "expected Arrow null for JSON null, got: {:?}", b.value(1));
+
+        // Row 2: absent field — must also be Arrow null
+        assert!(b.is_null(2), "expected Arrow null for absent field, got: {:?}", b.value(2));
+    }
+
+    #[test]
+    fn test_preserve_nulls_default_preserves_string_null() {
+        // Without `with_preserve_nulls(true)`, the existing behavior is
+        // preserved: JSON null is stored as the string "null".
+        let json_content = r#"{"a": 5, "b": null, "c": 10}"#;
+
+        let mut meta = HashMap::new();
+        meta.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, true).with_metadata(meta),
+            Field::new("c", DataType::Int64, false),
+        ]));
+
+        let batches: Vec<RecordBatch> = ReaderBuilder::new(schema)
+            .with_batch_size(1024)
+            .build(Cursor::new(json_content.as_bytes()))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let b = batches[0].column(1).as_string::<i32>();
+
+        // Default behavior: JSON null stored as non-null string "null"
+        assert!(!b.is_null(0));
+        assert_eq!(b.value(0), "null");
     }
 
     #[test]

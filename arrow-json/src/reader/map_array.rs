@@ -41,6 +41,7 @@ impl MapArrayDecoder {
         strict_mode: bool,
         is_nullable: bool,
         struct_mode: StructMode,
+        preserve_nulls: bool,
     ) -> Result<Self, ArrowError> {
         let fields = match &data_type {
             DataType::Map(_, true) => {
@@ -66,6 +67,7 @@ impl MapArrayDecoder {
             strict_mode,
             fields[0].is_nullable(),
             struct_mode,
+            preserve_nulls,
         )?;
         let values = make_decoder(
             fields[1].data_type().clone(),
@@ -74,6 +76,7 @@ impl MapArrayDecoder {
             strict_mode,
             fields[1].is_nullable(),
             struct_mode,
+            preserve_nulls,
         )?;
 
         Ok(Self {

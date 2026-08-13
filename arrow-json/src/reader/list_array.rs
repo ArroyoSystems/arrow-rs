@@ -42,6 +42,7 @@ impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
         strict_mode: bool,
         is_nullable: bool,
         struct_mode: StructMode,
+        preserve_nulls: bool,
     ) -> Result<Self, ArrowError> {
         let field = match &data_type {
             DataType::List(f) if !O::IS_LARGE => f,
@@ -55,6 +56,7 @@ impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
             strict_mode,
             field.is_nullable(),
             struct_mode,
+            preserve_nulls,
         )?;
 
         Ok(Self {

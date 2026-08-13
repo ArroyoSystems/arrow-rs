@@ -3072,26 +3072,18 @@ mod tests {
         assert_eq!(batches.len(), 1);
 
         let a = batches[0].column(0).as_primitive::<Int64Type>().value(0);
-        let b = batches[0]
-            .columns()
-            .get(1)
-            .unwrap()
-            .as_string::<i32>()
-            .value(0);
+        let b_col = batches[0].columns().get(1).unwrap().as_string::<i32>();
 
         let c = batches[0].column(2).as_primitive::<Int64Type>().value(0);
 
-        let d = batches[0]
-            .columns()
-            .get(3)
-            .unwrap()
-            .as_string::<i32>()
-            .value(0);
+        let d_col = batches[0].columns().get(3).unwrap().as_string::<i32>();
 
         assert_eq!(a, 5);
-        assert_eq!(b, "null");
+        // JSON null in arroyo.json fields produces Arrow null
+        assert!(b_col.is_null(0));
         assert_eq!(c, 10);
-        assert_eq!(d, "null");
+        // Absent arroyo.json field produces Arrow null
+        assert!(d_col.is_null(0));
     }
 
     #[test]

@@ -6,9 +6,8 @@ use arrow_data::ArrayData;
 use arrow_schema::ArrowError;
 
 pub struct JsonArrayDecoder {
-    // TODO: in the future, we may want a way to distinguish between a literal null value and absent
-    //  fields, however this likely requires changing the tape representation to record that
-    #[allow(unused)]
+    /// When true, top-level JSON null values produce Arrow nulls instead of
+    /// the non-null string `"null"`.
     is_nullable: bool,
 }
 
@@ -98,9 +97,13 @@ impl ArrayDecoder for JsonArrayDecoder {
         let mut builder = GenericStringBuilder::<i32>::new();
 
         for p in pos {
-            let mut s = String::with_capacity(32);
-            self.decode_int(&mut s, tape, *p)?;
-            builder.append_value(s);
+            if self.is_nullable && matches!(tape.get(*p), TapeElement::Null) {
+                builder.append_null();
+            } else {
+                let mut s = String::with_capacity(32);
+                self.decode_int(&mut s, tape, *p)?;
+                builder.append_value(s);
+            }
         }
 
         Ok(builder.finish().into_data())

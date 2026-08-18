@@ -662,6 +662,39 @@ mod tests {
     }
 
     #[test]
+    fn write_list_of_raw_json() {
+        let item_field = Arc::new(Field::new("item", DataType::Utf8, false).with_metadata(
+            HashMap::from([(
+                "ARROW:extension:name".to_string(),
+                "arroyo.json".to_string(),
+            )]),
+        ));
+        let schema = Schema::new(vec![Field::new_list("values", item_field.clone(), false)]);
+
+        let values = StringArray::from(vec!["null", r#"{"a":1}"#, r#""hello""#]);
+        let list = ListArray::try_new(
+            item_field,
+            OffsetBuffer::from_lengths([3]),
+            Arc::new(values),
+            None,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(list)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[&batch]).unwrap();
+        }
+
+        assert_json_eq(
+            &buf,
+            r#"{"values":[null,{"a":1},"hello"]}
+"#,
+        );
+    }
+
+    #[test]
     fn write_timestamps() {
         let ts_string = "2018-11-13T17:11:10.011375885995";
         let ts_nanos = ts_string

@@ -1,0 +1,19 @@
+arrow-json/src/writer/encoder.rs
+  s_5990d86f736423::t_ac07d677746918 274-282,542-549
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "67fceb889e67a8d254d4fbcaae14f00c6ba2c2c3",
+  "prompts": {},
+  "sessions": {
+    "s_5990d86f736423": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ffd3b-0231-7da0-86b0-2187c80ef70b",
+        "model": "unknown"
+      },
+      "human_author": "Micah Wylde <mwylde@cloudflare.com>"
+    }
+  }
+}

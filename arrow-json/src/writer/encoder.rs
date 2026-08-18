@@ -271,7 +271,15 @@ pub fn make_encoder<'a>(
         DataType::Null => NullableEncoder::new(Box::new(NullEncoder), array.logical_nulls()),
         DataType::Utf8 => {
             let array = array.as_string::<i32>();
-            NullableEncoder::new(Box::new(StringEncoder(array)), array.nulls().cloned())
+            let encoder: Box<dyn Encoder + 'a> = match field
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str)
+            {
+                Some("arroyo.json") => Box::new(RawJsonEncoder(array)),
+                _ => Box::new(StringEncoder(array)),
+            };
+            NullableEncoder::new(encoder, array.nulls().cloned())
         }
         DataType::LargeUtf8 => {
             let array = array.as_string::<i64>();
@@ -283,15 +291,15 @@ pub fn make_encoder<'a>(
         }
         DataType::List(_) => {
             let array = array.as_list::<i32>();
-            NullableEncoder::new(Box::new(ListEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::LargeList(_) => {
             let array = array.as_list::<i64>();
-            NullableEncoder::new(Box::new(ListEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::FixedSizeList(_, _) => {
             let array = array.as_fixed_size_list();
-            NullableEncoder::new(Box::new(FixedSizeListEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(FixedSizeListEncoder::try_new(array, options)?), array.nulls().cloned())
         }
 
         DataType::Dictionary(_, _) => downcast_dictionary_array! {
@@ -303,7 +311,7 @@ pub fn make_encoder<'a>(
 
         DataType::Map(_, _) => {
             let array = array.as_map();
-            NullableEncoder::new(Box::new(MapEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(MapEncoder::try_new(array, options)?), array.nulls().cloned())
         }
 
         DataType::FixedSizeBinary(_) => {
@@ -531,6 +539,14 @@ impl<O: OffsetSizeTrait> Encoder for StringEncoder<'_, O> {
     }
 }
 
+struct RawJsonEncoder<'a, O: OffsetSizeTrait>(&'a GenericStringArray<O>);
+
+impl<O: OffsetSizeTrait> Encoder for RawJsonEncoder<'_, O> {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.0.value(idx).as_bytes());
+    }
+}
+
 struct StringViewEncoder<'a>(&'a StringViewArray);
 
 impl Encoder for StringViewEncoder<'_> {
@@ -546,10 +562,13 @@ struct ListEncoder<'a, O: OffsetSizeTrait> {
 
 impl<'a, O: OffsetSizeTrait> ListEncoder<'a, O> {
     fn try_new(
-        field: &'a FieldRef,
         array: &'a GenericListArray<O>,
         options: &'a EncoderOptions,
     ) -> Result<Self, ArrowError> {
+        let field = match array.data_type() {
+            DataType::List(field) | DataType::LargeList(field) => field,
+            _ => unreachable!(),
+        };
         let encoder = make_encoder(field, array.values().as_ref(), options)?;
         Ok(Self {
             offsets: array.offsets().clone(),
@@ -594,10 +613,13 @@ struct FixedSizeListEncoder<'a> {
 
 impl<'a> FixedSizeListEncoder<'a> {
     fn try_new(
-        field: &'a FieldRef,
         array: &'a FixedSizeListArray,
         options: &'a EncoderOptions,
     ) -> Result<Self, ArrowError> {
+        let field = match array.data_type() {
+            DataType::FixedSizeList(field, _) => field,
+            _ => unreachable!(),
+        };
         let encoder = make_encoder(field, array.values().as_ref(), options)?;
         Ok(Self {
             encoder,
@@ -706,13 +728,16 @@ struct MapEncoder<'a> {
 }
 
 impl<'a> MapEncoder<'a> {
-    fn try_new(
-        field: &'a FieldRef,
-        array: &'a MapArray,
-        options: &'a EncoderOptions,
-    ) -> Result<Self, ArrowError> {
+    fn try_new(array: &'a MapArray, options: &'a EncoderOptions) -> Result<Self, ArrowError> {
         let values = array.values();
         let keys = array.keys();
+        let fields = match array.data_type() {
+            DataType::Map(field, _) => match field.data_type() {
+                DataType::Struct(fields) => fields,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
 
         if !matches!(keys.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
             return Err(ArrowError::JsonError(format!(
@@ -721,8 +746,8 @@ impl<'a> MapEncoder<'a> {
             )));
         }
 
-        let keys = make_encoder(field, keys, options)?;
-        let values = make_encoder(field, values, options)?;
+        let keys = make_encoder(&fields[0], keys, options)?;
+        let values = make_encoder(&fields[1], values, options)?;
 
         // We sanity check nulls as these are currently not enforced by MapArray (#1697)
         if keys.has_nulls() {

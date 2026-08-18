@@ -776,7 +776,7 @@ impl Decoder {
         let errors = build_detailed_errors(&tape, all_markers);
 
         let bad_data = if !bad_positions.is_empty() {
-            let mut json = JsonArrayDecoder::new(false);
+            let mut json = JsonArrayDecoder::new();
             let v = json.decode(&tape, &bad_positions).unwrap();
             Some(v.into())
         } else {
@@ -884,7 +884,7 @@ fn make_decoder(
         DataType::Boolean => Ok(Box::new(BooleanArrayDecoder::new(is_nullable))),
         DataType::Utf8 => {
             if metadata.get("ARROW:extension:name").map(|s| s.as_str()) == Some("arroyo.json") {
-              Ok(Box::new(JsonArrayDecoder::new(is_nullable)))
+              Ok(Box::new(JsonArrayDecoder::new()))
             } else {
                Ok(Box::new(StringArrayDecoder::<i32>::new(coerce_primitive, is_nullable)))
             }
@@ -3049,6 +3049,78 @@ mod tests {
     }
 
     #[test]
+    fn test_raw_json_round_trip() {
+        let input = r#"{
+          "object": {"a": null},
+          "json_string": "null",
+          "json_null": null
+        }"#;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
+        let raw_json_field = |name, nullable| {
+            Field::new(name, DataType::Utf8, nullable).with_metadata(metadata.clone())
+        };
+        let schema = Arc::new(Schema::new(vec![
+            raw_json_field("object", false),
+            raw_json_field("json_string", false),
+            raw_json_field("json_null", false),
+            raw_json_field("missing", true),
+        ]));
+
+        let batch = ReaderBuilder::new(schema)
+            .build(Cursor::new(input.as_bytes()))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            batch
+                .column_by_name("json_null")
+                .unwrap()
+                .as_string::<i32>()
+                .value(0),
+            "null"
+        );
+        assert!(batch.column_by_name("missing").unwrap().is_null(0));
+
+        let mut output = Vec::new();
+        let mut writer = crate::LineDelimitedWriter::new(&mut output);
+        writer.write_batches(&[&batch]).unwrap();
+        writer.finish().unwrap();
+
+        let expected: serde_json::Value = serde_json::from_str(input).unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_missing_non_nullable_raw_json_is_invalid() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "ARROW:extension:name".to_string(),
+            "arroyo.json".to_string(),
+        );
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "required",
+            DataType::Utf8,
+            false,
+        )
+        .with_metadata(metadata)]));
+
+        let result = ReaderBuilder::new(schema)
+            .build(Cursor::new(b"{}"))
+            .unwrap()
+            .next()
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_deserialize_nullable_raw_json() {
         let json_content = r#"{
           "a": 5,
@@ -3072,26 +3144,16 @@ mod tests {
         assert_eq!(batches.len(), 1);
 
         let a = batches[0].column(0).as_primitive::<Int64Type>().value(0);
-        let b = batches[0]
-            .columns()
-            .get(1)
-            .unwrap()
-            .as_string::<i32>()
-            .value(0);
+        let b = batches[0].columns().get(1).unwrap().as_string::<i32>();
 
         let c = batches[0].column(2).as_primitive::<Int64Type>().value(0);
 
-        let d = batches[0]
-            .columns()
-            .get(3)
-            .unwrap()
-            .as_string::<i32>()
-            .value(0);
+        let d = batches[0].columns().get(3).unwrap().as_string::<i32>();
 
         assert_eq!(a, 5);
-        assert_eq!(b, "null");
+        assert_eq!(b.value(0), "null");
         assert_eq!(c, 10);
-        assert_eq!(d, "null");
+        assert!(d.is_null(0));
     }
 
     #[test]

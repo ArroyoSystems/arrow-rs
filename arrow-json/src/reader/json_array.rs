@@ -5,12 +5,7 @@ use arrow_array::Array;
 use arrow_data::ArrayData;
 use arrow_schema::ArrowError;
 
-pub struct JsonArrayDecoder {
-    // TODO: in the future, we may want a way to distinguish between a literal null value and absent
-    //  fields, however this likely requires changing the tape representation to record that
-    #[allow(unused)]
-    is_nullable: bool,
-}
+pub struct JsonArrayDecoder;
 
 fn push_json_escaped(dst: &mut String, s: &str) {
     for ch in s.chars() {
@@ -32,8 +27,8 @@ fn push_json_escaped(dst: &mut String, s: &str) {
 }
 
 impl JsonArrayDecoder {
-    pub fn new(is_nullable: bool) -> Self {
-        Self { is_nullable }
+    pub fn new() -> Self {
+        Self
     }
 
     fn decode_int(&self, s: &mut String, tape: &Tape<'_>, pos: u32) -> Result<(), ArrowError> {
@@ -98,6 +93,14 @@ impl ArrayDecoder for JsonArrayDecoder {
         let mut builder = GenericStringBuilder::<i32>::new();
 
         for p in pos {
+            // the struct decoder uses 0 as a sentinel value to mark missing fields, we use this
+            // to distinguish between explicit JSON `null` values (which are carried forward as
+            // a non-null arrow field) and null arrow values
+            if *p == 0 {
+                builder.append_null();
+                continue;
+            }
+
             let mut s = String::with_capacity(32);
             self.decode_int(&mut s, tape, *p)?;
             builder.append_value(s);

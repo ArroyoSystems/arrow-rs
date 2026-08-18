@@ -1,0 +1,30 @@
+arrow-json/src/writer/encoder.rs
+  s_5990d86f736423::t_ac07d677746918 274-282,294,298,302,314,542-549
+  s_8ab6bb1429a0d3::t_05c8380f5b4850 568-571,619-622,731,734-740,749-750
+arrow-json/src/writer/mod.rs
+  s_8ab6bb1429a0d3::t_c08084851b7d43 664-696
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6e22804b008f9f93a42646e9b1d7c51140251908",
+  "prompts": {},
+  "sessions": {
+    "s_5990d86f736423": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ffd3b-0231-7da0-86b0-2187c80ef70b",
+        "model": "unknown"
+      },
+      "human_author": "Micah Wylde <mwylde@cloudflare.com>"
+    },
+    "s_8ab6bb1429a0d3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a016ec-269d-7362-b75a-0b5cfdb16a67",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Micah Wylde <mwylde@cloudflare.com>"
+    }
+  }
+}

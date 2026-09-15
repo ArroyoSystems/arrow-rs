@@ -440,16 +440,22 @@ impl StructArrayDecoder {
         field_idx: usize,
     ) -> Result<(), Vec<ErrorMarker<'tape>>> {
         let field = &struct_fields(&self.data_type)[field_idx];
-        let result = if !field.is_nullable() && matches!(tape.get(pos), TapeElement::Null) {
-            ErrorMarker::err(
-                row_idx,
-                pos,
-                FailureKind::NullValue,
-                Arc::new(field.data_type().clone()),
-            )
-        } else {
-            self.decoders[field_idx].validate_row(tape, pos, row_idx)
-        };
+        let raw_json = field.data_type() == &DataType::Utf8
+            && field
+                .metadata()
+                .get("ARROW:extension:name")
+                .is_some_and(|v| v == "arroyo.json");
+        let result =
+            if !field.is_nullable() && !raw_json && matches!(tape.get(pos), TapeElement::Null) {
+                ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::NullValue,
+                    Arc::new(field.data_type().clone()),
+                )
+            } else {
+                self.decoders[field_idx].validate_row(tape, pos, row_idx)
+            };
         result.map_err(|mut errors| {
             // Add field name for leaf validator errors that lack field context.
             for error in &mut errors {

@@ -36,6 +36,7 @@ bench = false
 all-features = true
 
 [dependencies]
+base64 = "0.22.1"
 arrow-array = { version = "58.4.0" }
 arrow-buffer = { version = "58.4.0" }
 arrow-cast = { version = "58.4.0" }

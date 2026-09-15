@@ -170,6 +170,16 @@ use crate::reader::timestamp_array::TimestampArrayDecoder;
 pub use schema::*;
 pub use value_iter::ValueIter;
 
+/// Encoding used for binary fields in the JSON reader.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum BinaryEncoding {
+    /// Standard padded base64, matching Arroyo's JSON input format.
+    #[default]
+    Base64,
+    /// Hexadecimal, matching the upstream Arrow reader and JSON writer.
+    Hex,
+}
+
 mod binary_array;
 mod boolean_array;
 mod decimal_array;
@@ -190,6 +200,7 @@ mod value_iter;
 
 /// A builder for [`Reader`] and [`Decoder`]
 pub struct ReaderBuilder {
+    binary_encoding: BinaryEncoding,
     batch_size: usize,
     coerce_primitive: bool,
     strict_mode: bool,
@@ -213,6 +224,7 @@ impl ReaderBuilder {
     /// [`infer_json_schema`]: crate::reader::infer_json_schema
     pub fn new(schema: SchemaRef) -> Self {
         Self {
+            binary_encoding: BinaryEncoding::default(),
             batch_size: 1024,
             coerce_primitive: false,
             strict_mode: false,
@@ -257,6 +269,7 @@ impl ReaderBuilder {
     /// ```
     pub fn new_with_field(field: impl Into<FieldRef>) -> Self {
         Self {
+            binary_encoding: BinaryEncoding::default(),
             batch_size: 1024,
             coerce_primitive: false,
             strict_mode: false,
@@ -272,6 +285,15 @@ impl ReaderBuilder {
     /// Sets the batch size in rows to read
     pub fn with_batch_size(self, batch_size: usize) -> Self {
         Self { batch_size, ..self }
+    }
+
+    /// Selects the encoding for binary fields. Defaults to base64 for Arroyo compatibility.
+    /// Use [`BinaryEncoding::Hex`] when reading output from the default JSON writer.
+    pub fn with_binary_encoding(self, binary_encoding: BinaryEncoding) -> Self {
+        Self {
+            binary_encoding,
+            ..self
+        }
     }
 
     /// Configures whether the reader will limit the input to the configured batch size or
@@ -362,6 +384,7 @@ impl ReaderBuilder {
         };
 
         let ctx = DecoderContext {
+            binary_encoding: self.binary_encoding,
             coerce_primitive: self.coerce_primitive,
             strict_mode: self.strict_mode,
             struct_mode: self.struct_mode,
@@ -809,6 +832,7 @@ trait ArrayDecoder: Send {
 /// This context is passed through the decoder creation process and contains
 /// all the configuration needed to create decoders recursively.
 pub struct DecoderContext {
+    binary_encoding: BinaryEncoding,
     /// Whether to coerce primitives to strings
     coerce_primitive: bool,
     /// Whether to validate struct fields strictly
@@ -962,10 +986,10 @@ fn make_decoder(
         DataType::LargeListView(_) => Ok(Box::new(ListViewArrayDecoder::<i64>::new(ctx, data_type, is_nullable)?)),
         DataType::FixedSizeList(_, _) => Ok(Box::new(FixedSizeListArrayDecoder::new(ctx, data_type, is_nullable)?)),
         DataType::Struct(_) => Ok(Box::new(StructArrayDecoder::new(ctx, data_type, is_nullable)?)),
-        DataType::Binary => Ok(Box::new(BinaryArrayDecoder::<i32>::new(is_nullable))),
-        DataType::LargeBinary => Ok(Box::new(BinaryArrayDecoder::<i64>::new(is_nullable))),
-        DataType::FixedSizeBinary(len) => Ok(Box::new(FixedSizeBinaryArrayDecoder::new(len, is_nullable))),
-        DataType::BinaryView => Ok(Box::new(BinaryViewDecoder::new(is_nullable))),
+        DataType::Binary => Ok(Box::new(BinaryArrayDecoder::<i32>::new(is_nullable, ctx.binary_encoding))),
+        DataType::LargeBinary => Ok(Box::new(BinaryArrayDecoder::<i64>::new(is_nullable, ctx.binary_encoding))),
+        DataType::FixedSizeBinary(len) => Ok(Box::new(FixedSizeBinaryArrayDecoder::new(len, is_nullable, ctx.binary_encoding))),
+        DataType::BinaryView => Ok(Box::new(BinaryViewDecoder::new(is_nullable, ctx.binary_encoding))),
         DataType::Map(_, _) => Ok(Box::new(MapArrayDecoder::new(ctx, data_type, is_nullable)?)),
         DataType::RunEndEncoded(ref r, _) => match r.data_type() {
             DataType::Int16 => Ok(Box::new(RunEndEncodedArrayDecoder::<Int16Type>::new(ctx, data_type, is_nullable)?)),

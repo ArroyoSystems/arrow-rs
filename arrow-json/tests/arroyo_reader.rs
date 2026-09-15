@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_json::reader::BinaryEncoding;
@@ -138,4 +139,58 @@ fn binary_base64_and_hex_are_explicit_and_filter_invalid_rows() {
             .value(0),
         b"hello"
     );
+}
+
+#[test]
+fn raw_json_metadata_survives_nested_arrow_types() {
+    let raw = Arc::new(
+        Field::new("item", DataType::Utf8, false).with_metadata(HashMap::from([(
+            "ARROW:extension:name".into(),
+            "arroyo.json".into(),
+        )])),
+    );
+    let list_json = "[null,\"null\",{\"n\":1}]\n";
+    for (data_type, input) in [
+        (DataType::List(raw.clone()), list_json),
+        (DataType::LargeList(raw.clone()), list_json),
+        (DataType::ListView(raw.clone()), list_json),
+        (DataType::LargeListView(raw.clone()), list_json),
+        (DataType::FixedSizeList(raw.clone(), 3), list_json),
+        (
+            DataType::RunEndEncoded(
+                Arc::new(Field::new("run_ends", DataType::Int32, false)),
+                raw.clone(),
+            ),
+            "null\n",
+        ),
+        (
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(
+                        vec![Arc::new(Field::new("keys", DataType::Utf8, false)), raw].into(),
+                    ),
+                    false,
+                )),
+                false,
+            ),
+            "{\"a\":null,\"b\":{\"n\":1}}\n",
+        ),
+    ] {
+        let mut decoder =
+            ReaderBuilder::new_with_field(Field::new("value", data_type.clone(), false))
+                .with_allow_bad_data(true)
+                .build_decoder()
+                .unwrap();
+        decoder.decode(input.as_bytes()).unwrap();
+        let (batch, _, bad, errors) = decoder.flush_with_bad_data().unwrap().unwrap();
+        assert!(bad.is_none(), "{data_type}: {errors:?}");
+        let mut output = Vec::new();
+        let mut writer = arrow_json::LineDelimitedWriter::new(&mut output);
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(input).unwrap();
+        assert_eq!(actual["value"], expected, "{data_type}");
+    }
 }

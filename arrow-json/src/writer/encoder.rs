@@ -336,7 +336,15 @@ pub fn make_encoder<'a>(
         DataType::Null => NullableEncoder::new(Box::new(NullEncoder), array.logical_nulls()),
         DataType::Utf8 => {
             let array = array.as_string::<i32>();
-            NullableEncoder::new(Box::new(StringEncoder(array)), array.nulls().cloned())
+            let encoder: Box<dyn Encoder + 'a> = match field
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str)
+            {
+                Some("arroyo.json") => Box::new(RawJsonEncoder(array)),
+                _ => Box::new(StringEncoder(array)),
+            };
+            NullableEncoder::new(encoder, array.nulls().cloned())
         }
         DataType::LargeUtf8 => {
             let array = array.as_string::<i64>();
@@ -352,23 +360,23 @@ pub fn make_encoder<'a>(
         }
         DataType::List(_) => {
             let array = array.as_list::<i32>();
-            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::LargeList(_) => {
             let array = array.as_list::<i64>();
-            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::ListView(_) => {
             let array = array.as_list_view::<i32>();
-            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::LargeListView(_) => {
             let array = array.as_list_view::<i64>();
-            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(array, options)?), array.nulls().cloned())
         }
         DataType::FixedSizeList(_, _) => {
             let array = array.as_fixed_size_list();
-            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(ListLikeEncoder::try_new(array, options)?), array.nulls().cloned())
         }
 
         DataType::Dictionary(_, _) => downcast_dictionary_array! {
@@ -381,7 +389,7 @@ pub fn make_encoder<'a>(
         DataType::RunEndEncoded(_, _) => downcast_run_array! {
             array => {
                 NullableEncoder::new(
-                    Box::new(RunEndEncodedEncoder::try_new(field, array, options)?),
+                    Box::new(RunEndEncodedEncoder::try_new(array, options)?),
                     array.logical_nulls(),
                 )
             },
@@ -390,7 +398,7 @@ pub fn make_encoder<'a>(
 
         DataType::Map(_, _) => {
             let array = array.as_map();
-            NullableEncoder::new(Box::new(MapEncoder::try_new(field, array, options)?), array.nulls().cloned())
+            NullableEncoder::new(Box::new(MapEncoder::try_new(array, options)?), array.nulls().cloned())
         }
 
         DataType::FixedSizeBinary(_) => {
@@ -631,6 +639,14 @@ impl<O: OffsetSizeTrait> Encoder for StringEncoder<'_, O> {
     }
 }
 
+struct RawJsonEncoder<'a, O: OffsetSizeTrait>(&'a GenericStringArray<O>);
+
+impl<O: OffsetSizeTrait> Encoder for RawJsonEncoder<'_, O> {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.0.value(idx).as_bytes());
+    }
+}
+
 struct StringViewEncoder<'a>(&'a StringViewArray);
 
 impl Encoder for StringViewEncoder<'_> {
@@ -653,11 +669,15 @@ struct ListLikeEncoder<'a, L: ListLikeArray> {
 }
 
 impl<'a, L: ListLikeArray> ListLikeEncoder<'a, L> {
-    fn try_new(
-        field: &'a FieldRef,
-        array: &'a L,
-        options: &'a EncoderOptions,
-    ) -> Result<Self, ArrowError> {
+    fn try_new(array: &'a L, options: &'a EncoderOptions) -> Result<Self, ArrowError> {
+        let field = match array.data_type() {
+            DataType::List(field)
+            | DataType::LargeList(field)
+            | DataType::ListView(field)
+            | DataType::LargeListView(field)
+            | DataType::FixedSizeList(field, _) => field,
+            _ => unreachable!(),
+        };
         let encoder = make_encoder(field, array.values().as_ref(), options)?;
         Ok(Self {
             list_array: array,
@@ -727,11 +747,10 @@ struct RunEndEncodedEncoder<'a, R: RunEndIndexType> {
 }
 
 impl<'a, R: RunEndIndexType> RunEndEncodedEncoder<'a, R> {
-    fn try_new(
-        field: &'a FieldRef,
-        array: &'a RunArray<R>,
-        options: &'a EncoderOptions,
-    ) -> Result<Self, ArrowError> {
+    fn try_new(array: &'a RunArray<R>, options: &'a EncoderOptions) -> Result<Self, ArrowError> {
+        let DataType::RunEndEncoded(_, field) = array.data_type() else {
+            unreachable!()
+        };
         let encoder = make_encoder(field, array.values().as_ref(), options)?;
         Ok(Self {
             run_array: array,
@@ -793,13 +812,16 @@ struct MapEncoder<'a> {
 }
 
 impl<'a> MapEncoder<'a> {
-    fn try_new(
-        field: &'a FieldRef,
-        array: &'a MapArray,
-        options: &'a EncoderOptions,
-    ) -> Result<Self, ArrowError> {
+    fn try_new(array: &'a MapArray, options: &'a EncoderOptions) -> Result<Self, ArrowError> {
         let values = array.values();
         let keys = array.keys();
+        let fields = match array.data_type() {
+            DataType::Map(field, _) => match field.data_type() {
+                DataType::Struct(fields) => fields,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
 
         if !matches!(
             keys.data_type(),
@@ -811,8 +833,8 @@ impl<'a> MapEncoder<'a> {
             )));
         }
 
-        let keys = make_encoder(field, keys, options)?;
-        let values = make_encoder(field, values, options)?;
+        let keys = make_encoder(&fields[0], keys, options)?;
+        let values = make_encoder(&fields[1], values, options)?;
 
         // We sanity check nulls as these are currently not enforced by MapArray (#1697)
         if keys.has_nulls() {

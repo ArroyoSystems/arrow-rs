@@ -20,17 +20,19 @@ use std::sync::Arc;
 
 use arrow_array::builder::GenericStringBuilder;
 use arrow_array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 use itoa;
 use ryu;
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext};
 
 const TRUE: &str = "true";
 const FALSE: &str = "false";
 
 pub struct StringArrayDecoder<O: OffsetSizeTrait> {
+    data_type: Arc<DataType>,
     coerce_primitive: bool,
     ignore_type_conflicts: bool,
     is_nullable: bool,
@@ -42,6 +44,7 @@ impl<O: OffsetSizeTrait> StringArrayDecoder<O> {
         Self {
             coerce_primitive: ctx.coerce_primitive(),
             ignore_type_conflicts: ctx.ignore_type_conflicts(),
+            data_type: Arc::new(GenericStringArray::<O>::DATA_TYPE),
             is_nullable,
             phantom: Default::default(),
         }
@@ -139,18 +142,35 @@ impl<O: OffsetSizeTrait> ArrayDecoder for StringArrayDecoder<O> {
         Ok(Arc::new(builder.finish()))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::String(_) => true,
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::String(_) => return Ok(()),
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
             TapeElement::True
             | TapeElement::False
             | TapeElement::Number(_)
             | TapeElement::I64(_)
             | TapeElement::I32(_)
             | TapeElement::F32(_)
-            | TapeElement::F64(_) => self.coerce_primitive,
-            _ => false,
-        }
+            | TapeElement::F64(_) => {
+                if self.coerce_primitive {
+                    return Ok(());
+                }
+                FailureKind::TypeMismatch
+            }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

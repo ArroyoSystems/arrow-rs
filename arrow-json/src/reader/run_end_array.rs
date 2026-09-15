@@ -58,8 +58,13 @@ impl<R: RunEndIndexType> RunEndEncodedArrayDecoder<R> {
 }
 
 impl<R: RunEndIndexType + Send> ArrayDecoder for RunEndEncodedArrayDecoder<R> {
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        self.decoder.validate_row(tape, pos)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<super::ErrorMarker<'tape>>> {
+        self.decoder.validate_row(tape, pos, row_idx)
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {

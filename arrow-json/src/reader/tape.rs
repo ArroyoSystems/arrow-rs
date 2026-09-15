@@ -211,6 +211,17 @@ impl<'a> Tape<'a> {
         self.serialize(&mut out, idx);
         ArrowError::JsonError(format!("expected {expected} got {out}"))
     }
+
+    /// Creates a new Tape for testing purposes
+    #[cfg(test)]
+    pub fn new(elements: &'a [TapeElement], strings: &'a str, string_offsets: &'a [usize]) -> Self {
+        Self {
+            elements,
+            strings,
+            string_offsets,
+            num_rows: 0,
+        }
+    }
 }
 
 /// States based on <https://www.json.org/json-en.html>

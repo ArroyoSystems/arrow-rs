@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use arrow_json::reader::BinaryEncoding;
 use arrow_json::{ReaderBuilder, StructMode};
 use arrow_schema::{DataType, Field};
 
@@ -42,6 +43,7 @@ fn bad_row_filtering_supports_new_arrow_types() {
     ] {
         let mut decoder =
             ReaderBuilder::new_with_field(Field::new("value", data_type.clone(), false))
+                .with_binary_encoding(BinaryEncoding::Hex)
                 .with_allow_bad_data(true)
                 .build_decoder()
                 .unwrap();
@@ -83,4 +85,57 @@ fn unlimited_batch_input_and_serialized_decimals() {
     assert_eq!(decoder.flush().unwrap().unwrap().num_rows(), 3);
     decoder.serialize(&[1.25_f64, 2.5]).unwrap();
     assert_eq!(decoder.flush().unwrap().unwrap().num_rows(), 2);
+}
+
+#[test]
+fn binary_base64_and_hex_are_explicit_and_filter_invalid_rows() {
+    use arrow_array::Array;
+    use arrow_array::cast::AsArray;
+    for data_type in [
+        DataType::Binary,
+        DataType::LargeBinary,
+        DataType::BinaryView,
+        DataType::FixedSizeBinary(2),
+    ] {
+        for (encoding, value) in [
+            (BinaryEncoding::Base64, "YWI="),
+            (BinaryEncoding::Hex, "6162"),
+        ] {
+            let mut decoder =
+                ReaderBuilder::new_with_field(Field::new("value", data_type.clone(), true))
+                    .with_binary_encoding(encoding)
+                    .with_allow_bad_data(true)
+                    .build_decoder()
+                    .unwrap();
+            decoder
+                .decode(format!("\"{value}\"\n\"!\"\nnull\n").as_bytes())
+                .unwrap();
+            let batch = decoder.flush().unwrap().unwrap();
+            let array = batch.column(0);
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(1));
+            let bytes = match data_type {
+                DataType::Binary => array.as_binary::<i32>().value(0),
+                DataType::LargeBinary => array.as_binary::<i64>().value(0),
+                DataType::BinaryView => array.as_binary_view().value(0),
+                DataType::FixedSizeBinary(_) => array.as_fixed_size_binary().value(0),
+                _ => unreachable!(),
+            };
+            assert_eq!(bytes, b"ab");
+        }
+    }
+    let mut decoder = ReaderBuilder::new_with_field(Field::new("value", DataType::Binary, false))
+        .build_decoder()
+        .unwrap();
+    decoder.decode(b"\"aGVsbG8=\"\n").unwrap();
+    assert_eq!(
+        decoder
+            .flush()
+            .unwrap()
+            .unwrap()
+            .column(0)
+            .as_binary::<i32>()
+            .value(0),
+        b"hello"
+    );
 }

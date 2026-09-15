@@ -20,10 +20,16 @@
 //! See the module level documentation for the
 //! [`reader`] and [`writer`] for usage examples.
 //!
-//! # Binary Data uses `Base16` Encoding
+//! # Binary encoding in the Arroyo fork
+//!
+//! The reader defaults to standard padded base64. Select
+//! [`reader::BinaryEncoding::Hex`] with [`ReaderBuilder::with_binary_encoding`]
+//! to read hexadecimal input, including output from the default JSON writer.
+//!
+//! # The JSON writer uses `Base16` encoding
 //!
 //! As per [RFC7159] JSON cannot encode arbitrary binary data. This crate works around that
-//! limitation by encoding/decoding binary data as a [hexadecimal] string (i.e.
+//! limitation by encoding binary data as a [hexadecimal] string (i.e.
 //! [`Base16` encoding]).
 //!
 //! Note that `Base16` only has 50% space efficiency (i.e., the encoded data is twice as large
@@ -337,6 +343,7 @@ mod tests {
 
         let decoded = {
             let mut decoder = ReaderBuilder::new(batch.schema().clone())
+                .with_binary_encoding(crate::reader::BinaryEncoding::Hex)
                 .build_decoder()
                 .unwrap();
             decoder.serialize(json_array).unwrap();

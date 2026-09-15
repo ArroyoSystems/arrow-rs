@@ -23,8 +23,9 @@ use arrow_array::builder::{BinaryViewBuilder, FixedSizeBinaryBuilder, GenericBin
 use arrow_array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
 use arrow_schema::ArrowError;
 
-use crate::reader::ArrayDecoder;
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::{ArrayDecoder, BinaryEncoding};
+use base64::{Engine, prelude::BASE64_STANDARD};
 
 #[inline]
 fn decode_hex_digit(byte: u8) -> Option<u8> {
@@ -86,11 +87,13 @@ fn decode_hex_to_writer<W: Write>(hex_string: &str, writer: &mut W) -> Result<()
 pub struct BinaryArrayDecoder<O: OffsetSizeTrait> {
     phantom: PhantomData<O>,
     is_nullable: bool,
+    encoding: BinaryEncoding,
 }
 
 impl<O: OffsetSizeTrait> BinaryArrayDecoder<O> {
-    pub fn new(is_nullable: bool) -> Self {
+    pub fn new(is_nullable: bool, encoding: BinaryEncoding) -> Self {
         Self {
+            encoding,
             phantom: PhantomData,
             is_nullable,
         }
@@ -99,7 +102,7 @@ impl<O: OffsetSizeTrait> BinaryArrayDecoder<O> {
 
 impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
     fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, None)
+        validate_binary(tape, pos, self.is_nullable, None, self.encoding)
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -120,7 +123,7 @@ impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
                     let string = tape.get_string(idx);
                     // Decode directly into the builder for performance. If decoding fails,
                     // the error is terminal and the builder is discarded by the caller.
-                    decode_hex_to_writer(string, &mut builder)?;
+                    decode_binary_to_writer(string, &mut builder, self.encoding)?;
                     builder.append_value(b"");
                 }
                 TapeElement::Null => builder.append_null(),
@@ -136,17 +139,22 @@ impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
 pub struct FixedSizeBinaryArrayDecoder {
     len: i32,
     is_nullable: bool,
+    encoding: BinaryEncoding,
 }
 
 impl FixedSizeBinaryArrayDecoder {
-    pub fn new(len: i32, is_nullable: bool) -> Self {
-        Self { len, is_nullable }
+    pub fn new(len: i32, is_nullable: bool, encoding: BinaryEncoding) -> Self {
+        Self {
+            len,
+            is_nullable,
+            encoding,
+        }
     }
 }
 
 impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
     fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, Some(self.len))
+        validate_binary(tape, pos, self.is_nullable, Some(self.len), self.encoding)
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -160,7 +168,7 @@ impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
                     let string = tape.get_string(idx);
                     scratch.clear();
                     scratch.reserve(string.len().div_ceil(2));
-                    decode_hex_to_writer(string, &mut scratch)?;
+                    decode_binary_to_writer(string, &mut scratch, self.encoding)?;
                     builder.append_value(&scratch)?;
                 }
                 TapeElement::Null => builder.append_null(),
@@ -175,17 +183,21 @@ impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
 #[derive(Default)]
 pub struct BinaryViewDecoder {
     is_nullable: bool,
+    encoding: BinaryEncoding,
 }
 
 impl BinaryViewDecoder {
-    pub fn new(is_nullable: bool) -> Self {
-        Self { is_nullable }
+    pub fn new(is_nullable: bool, encoding: BinaryEncoding) -> Self {
+        Self {
+            is_nullable,
+            encoding,
+        }
     }
 }
 
 impl ArrayDecoder for BinaryViewDecoder {
     fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, None)
+        validate_binary(tape, pos, self.is_nullable, None, self.encoding)
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -199,7 +211,7 @@ impl ArrayDecoder for BinaryViewDecoder {
                     let string = tape.get_string(idx);
                     scratch.clear();
                     scratch.reserve(string.len().div_ceil(2));
-                    decode_hex_to_writer(string, &mut scratch)?;
+                    decode_binary_to_writer(string, &mut scratch, self.encoding)?;
                     builder.append_value(&scratch);
                 }
                 TapeElement::Null => builder.append_null(),
@@ -211,13 +223,44 @@ impl ArrayDecoder for BinaryViewDecoder {
     }
 }
 
-fn validate_binary(tape: &Tape<'_>, pos: u32, is_nullable: bool, len: Option<i32>) -> bool {
+fn decode_binary_to_writer<W: Write>(
+    value: &str,
+    writer: &mut W,
+    encoding: BinaryEncoding,
+) -> Result<(), ArrowError> {
+    match encoding {
+        BinaryEncoding::Hex => decode_hex_to_writer(value, writer),
+        BinaryEncoding::Base64 => {
+            let bytes = BASE64_STANDARD.decode(value).map_err(|e| {
+                ArrowError::JsonError(format!("invalid base64-encoded binary: {e}"))
+            })?;
+            writer
+                .write_all(&bytes)
+                .map_err(|e| ArrowError::JsonError(format!("failed to write binary data: {e}")))
+        }
+    }
+}
+
+fn validate_binary(
+    tape: &Tape<'_>,
+    pos: u32,
+    is_nullable: bool,
+    len: Option<i32>,
+    encoding: BinaryEncoding,
+) -> bool {
     match tape.get(pos) {
         TapeElement::Null => is_nullable,
         TapeElement::String(idx) => {
             let value = tape.get_string(idx);
-            len.is_none_or(|len| usize::try_from(len).ok() == Some(value.len().div_ceil(2)))
-                && decode_hex_to_writer(value, &mut std::io::sink()).is_ok()
+            match encoding {
+                BinaryEncoding::Hex => {
+                    len.is_none_or(|len| usize::try_from(len).ok() == Some(value.len().div_ceil(2)))
+                        && decode_hex_to_writer(value, &mut std::io::sink()).is_ok()
+                }
+                BinaryEncoding::Base64 => BASE64_STANDARD.decode(value).is_ok_and(|v| {
+                    len.is_none_or(|len| usize::try_from(len).ok() == Some(v.len()))
+                }),
+            }
         }
         _ => false,
     }
@@ -229,9 +272,8 @@ fn estimate_data_capacity(tape: &Tape<'_>, pos: &[u32]) -> Result<usize, ArrowEr
         match tape.get(*p) {
             TapeElement::String(idx) => {
                 let string_len = tape.get_string(idx).len();
-                // two hex characters represent one byte
-                let decoded_len = string_len.div_ceil(2);
-                data_capacity += decoded_len;
+                // Upper bound for either hex or base64, avoiding reallocation for base64.
+                data_capacity += string_len;
             }
             TapeElement::Null => {}
             _ => {
@@ -285,6 +327,7 @@ mod tests {
         let field = Field::new("item", DataType::Binary, false);
         let data = b"\"0f0g\"\n\"0f00\"\n";
         let mut reader = ReaderBuilder::new_with_field(field)
+            .with_binary_encoding(BinaryEncoding::Hex)
             .build(Cursor::new(data))
             .unwrap();
 

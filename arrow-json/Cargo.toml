@@ -36,12 +36,12 @@ bench = false
 all-features = true
 
 [dependencies]
-arrow-array = { workspace = true }
-arrow-buffer = { workspace = true }
-arrow-cast = { workspace = true }
-arrow-ord = { workspace = true }
-arrow-schema = { workspace = true }
-arrow-select = { workspace = true }
+arrow-array = { version = "58.4.0" }
+arrow-buffer = { version = "58.4.0" }
+arrow-cast = { version = "58.4.0" }
+arrow-ord = { version = "58.4.0" }
+arrow-schema = { version = "58.4.0" }
+arrow-select = { version = "58.4.0" }
 half = { version = "2.1", default-features = false }
 indexmap = { version = "2.0", default-features = false, features = ["std"] }
 num-traits = { version = "0.2.19", default-features = false, features = ["std"] }

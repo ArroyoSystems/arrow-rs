@@ -27,11 +27,13 @@ use crate::reader::{ArrayDecoder, DecoderContext};
 #[derive(Default)]
 pub struct BooleanArrayDecoder {
     ignore_type_conflicts: bool,
+    is_nullable: bool,
 }
 impl BooleanArrayDecoder {
-    pub fn new(ctx: &DecoderContext) -> Self {
+    pub fn new(ctx: &DecoderContext, is_nullable: bool) -> Self {
         Self {
             ignore_type_conflicts: ctx.ignore_type_conflicts(),
+            is_nullable,
         }
     }
 }
@@ -50,5 +52,13 @@ impl ArrayDecoder for BooleanArrayDecoder {
         }
 
         Ok(Arc::new(builder.finish()))
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::True | TapeElement::False => true,
+            _ => false,
+        }
     }
 }

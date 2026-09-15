@@ -85,9 +85,23 @@ fn decode_hex_to_writer<W: Write>(hex_string: &str, writer: &mut W) -> Result<()
 #[derive(Default)]
 pub struct BinaryArrayDecoder<O: OffsetSizeTrait> {
     phantom: PhantomData<O>,
+    is_nullable: bool,
+}
+
+impl<O: OffsetSizeTrait> BinaryArrayDecoder<O> {
+    pub fn new(is_nullable: bool) -> Self {
+        Self {
+            phantom: PhantomData,
+            is_nullable,
+        }
+    }
 }
 
 impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        validate_binary(tape, pos, self.is_nullable, None)
+    }
+
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
         let data_capacity = estimate_data_capacity(tape, pos)?;
 
@@ -121,15 +135,20 @@ impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
 #[derive(Default)]
 pub struct FixedSizeBinaryArrayDecoder {
     len: i32,
+    is_nullable: bool,
 }
 
 impl FixedSizeBinaryArrayDecoder {
-    pub fn new(len: i32) -> Self {
-        Self { len }
+    pub fn new(len: i32, is_nullable: bool) -> Self {
+        Self { len, is_nullable }
     }
 }
 
 impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        validate_binary(tape, pos, self.is_nullable, Some(self.len))
+    }
+
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
         let mut builder = FixedSizeBinaryBuilder::with_capacity(pos.len(), self.len);
         // Preallocate for the decoded byte width (FixedSizeBinary len), not the hex string length.
@@ -154,9 +173,21 @@ impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
 }
 
 #[derive(Default)]
-pub struct BinaryViewDecoder {}
+pub struct BinaryViewDecoder {
+    is_nullable: bool,
+}
+
+impl BinaryViewDecoder {
+    pub fn new(is_nullable: bool) -> Self {
+        Self { is_nullable }
+    }
+}
 
 impl ArrayDecoder for BinaryViewDecoder {
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        validate_binary(tape, pos, self.is_nullable, None)
+    }
+
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
         let data_capacity = estimate_data_capacity(tape, pos)?;
         let mut builder = BinaryViewBuilder::with_capacity(data_capacity);
@@ -177,6 +208,18 @@ impl ArrayDecoder for BinaryViewDecoder {
         }
 
         Ok(Arc::new(builder.finish()))
+    }
+}
+
+fn validate_binary(tape: &Tape<'_>, pos: u32, is_nullable: bool, len: Option<i32>) -> bool {
+    match tape.get(pos) {
+        TapeElement::Null => is_nullable,
+        TapeElement::String(idx) => {
+            let value = tape.get_string(idx);
+            len.is_none_or(|len| usize::try_from(len).ok() == Some(value.len().div_ceil(2)))
+                && decode_hex_to_writer(value, &mut std::io::sink()).is_ok()
+        }
+        _ => false,
     }
 }
 

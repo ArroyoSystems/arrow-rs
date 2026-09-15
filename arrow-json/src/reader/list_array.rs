@@ -25,12 +25,14 @@ use arrow_buffer::{NullBufferBuilder, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, FieldRef};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext};
 
 pub type ListArrayDecoder<O> = ListLikeArrayDecoder<O, false>;
 pub type ListViewArrayDecoder<O> = ListLikeArrayDecoder<O, true>;
 
 pub struct ListLikeArrayDecoder<O, const IS_VIEW: bool> {
+    data_type: Arc<DataType>,
     field: FieldRef,
     decoder: Box<dyn ArrayDecoder>,
     phantom: PhantomData<O>,
@@ -54,6 +56,7 @@ impl<O: OffsetSizeTrait, const IS_VIEW: bool> ListLikeArrayDecoder<O, IS_VIEW> {
         let decoder = ctx.make_field_decoder(field, field.is_nullable())?;
 
         Ok(Self {
+            data_type: Arc::new(data_type.clone()),
             field: field.clone(),
             decoder,
             phantom: Default::default(),
@@ -64,23 +67,20 @@ impl<O: OffsetSizeTrait, const IS_VIEW: bool> ListLikeArrayDecoder<O, IS_VIEW> {
 }
 
 impl<O: OffsetSizeTrait, const IS_VIEW: bool> ArrayDecoder for ListLikeArrayDecoder<O, IS_VIEW> {
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        let end = match tape.get(pos) {
-            TapeElement::StartList(end) => end,
-            TapeElement::Null => return self.is_nullable,
-            _ => return false,
-        };
-        let mut child = pos + 1;
-        while child < end {
-            if !self.decoder.validate_row(tape, child) {
-                return false;
-            }
-            let Ok(next) = tape.next(child, "list value") else {
-                return false;
-            };
-            child = next;
-        }
-        true
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        validate_list(
+            self.decoder.as_ref(),
+            tape,
+            pos,
+            row_idx,
+            &self.data_type,
+            self.is_nullable,
+        )
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -153,6 +153,7 @@ impl<O: OffsetSizeTrait, const IS_VIEW: bool> ArrayDecoder for ListLikeArrayDeco
 }
 
 pub struct FixedSizeListArrayDecoder {
+    data_type: Arc<DataType>,
     field: FieldRef,
     size: i32,
     decoder: Box<dyn ArrayDecoder>,
@@ -173,6 +174,7 @@ impl FixedSizeListArrayDecoder {
         let decoder = ctx.make_field_decoder(field, field.is_nullable())?;
 
         Ok(Self {
+            data_type: Arc::new(data_type.clone()),
             field: field.clone(),
             size,
             decoder,
@@ -238,30 +240,65 @@ impl ArrayDecoder for FixedSizeListArrayDecoder {
         Ok(Arc::new(array))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        let end_idx = match (tape.get(pos), self.is_nullable) {
-            (TapeElement::StartList(end_idx), _) => end_idx,
-            (TapeElement::Null, true) => {
-                return true;
-            }
-            _ => return false,
-        };
-
-        let mut count = 0;
-        let mut cur_idx = pos + 1;
-        while cur_idx < end_idx {
-            if !self.decoder.validate_row(tape, cur_idx) {
-                return false;
-            }
-            count += 1;
-            // Advance to next field
-            if let Ok(next) = tape.next(cur_idx, "list value") {
-                cur_idx = next;
-            } else {
-                return false;
-            }
-        }
-
-        count == self.size as usize
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        validate_list(
+            self.decoder.as_ref(),
+            tape,
+            pos,
+            row_idx,
+            &self.data_type,
+            self.is_nullable,
+        )
     }
+}
+
+fn validate_list<'tape>(
+    decoder: &'tape dyn ArrayDecoder,
+    tape: &'tape Tape<'_>,
+    pos: u32,
+    row_idx: usize,
+    data_type: &Arc<DataType>,
+    is_nullable: bool,
+) -> Result<(), Vec<ErrorMarker<'tape>>> {
+    let end = match tape.get(pos) {
+        TapeElement::StartList(end) => end,
+        TapeElement::Null if is_nullable => return Ok(()),
+        TapeElement::Null => {
+            return ErrorMarker::err(row_idx, pos, FailureKind::NullValue, data_type.clone());
+        }
+        _ => return ErrorMarker::err(row_idx, pos, FailureKind::TypeMismatch, data_type.clone()),
+    };
+    let mut child = pos + 1;
+    let mut index = 0;
+    while child < end {
+        if let Err(mut errors) = decoder.validate_row(tape, child, row_idx) {
+            for error in &mut errors {
+                error.array_indices.push(index);
+            }
+            return Err(errors);
+        }
+        child = match tape.next(child, "list value") {
+            Ok(next) => next,
+            Err(_) => {
+                return ErrorMarker::err(
+                    row_idx,
+                    child,
+                    FailureKind::TypeMismatch,
+                    data_type.clone(),
+                );
+            }
+        };
+        index += 1;
+    }
+    if let DataType::FixedSizeList(_, size) = data_type.as_ref()
+        && index != *size as usize
+    {
+        return ErrorMarker::err(row_idx, pos, FailureKind::TypeMismatch, data_type.clone());
+    }
+    Ok(())
 }

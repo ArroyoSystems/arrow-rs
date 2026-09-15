@@ -24,6 +24,7 @@ use arrow_array::{ArrayRef, GenericStringArray, OffsetSizeTrait};
 use arrow_schema::ArrowError;
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, BinaryEncoding};
 use base64::{Engine, prelude::BASE64_STANDARD};
 
@@ -101,8 +102,21 @@ impl<O: OffsetSizeTrait> BinaryArrayDecoder<O> {
 }
 
 impl<O: OffsetSizeTrait> ArrayDecoder for BinaryArrayDecoder<O> {
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, None, self.encoding)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        validate_binary(
+            tape,
+            pos,
+            self.is_nullable,
+            None,
+            self.encoding,
+            row_idx,
+            arrow_array::GenericBinaryArray::<O>::DATA_TYPE,
+        )
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -153,8 +167,21 @@ impl FixedSizeBinaryArrayDecoder {
 }
 
 impl ArrayDecoder for FixedSizeBinaryArrayDecoder {
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, Some(self.len), self.encoding)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        validate_binary(
+            tape,
+            pos,
+            self.is_nullable,
+            Some(self.len),
+            self.encoding,
+            row_idx,
+            arrow_schema::DataType::FixedSizeBinary(self.len),
+        )
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -196,8 +223,21 @@ impl BinaryViewDecoder {
 }
 
 impl ArrayDecoder for BinaryViewDecoder {
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        validate_binary(tape, pos, self.is_nullable, None, self.encoding)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        validate_binary(
+            tape,
+            pos,
+            self.is_nullable,
+            None,
+            self.encoding,
+            row_idx,
+            arrow_schema::DataType::BinaryView,
+        )
     }
 
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
@@ -241,18 +281,21 @@ fn decode_binary_to_writer<W: Write>(
     }
 }
 
-fn validate_binary(
-    tape: &Tape<'_>,
+fn validate_binary<'tape>(
+    tape: &'tape Tape<'_>,
     pos: u32,
     is_nullable: bool,
     len: Option<i32>,
     encoding: BinaryEncoding,
-) -> bool {
-    match tape.get(pos) {
-        TapeElement::Null => is_nullable,
+    row_idx: usize,
+    data_type: arrow_schema::DataType,
+) -> Result<(), Vec<ErrorMarker<'tape>>> {
+    let failure = match tape.get(pos) {
+        TapeElement::Null if is_nullable => return Ok(()),
+        TapeElement::Null => FailureKind::NullValue,
         TapeElement::String(idx) => {
             let value = tape.get_string(idx);
-            match encoding {
+            let valid = match encoding {
                 BinaryEncoding::Hex => {
                     len.is_none_or(|len| usize::try_from(len).ok() == Some(value.len().div_ceil(2)))
                         && decode_hex_to_writer(value, &mut std::io::sink()).is_ok()
@@ -260,10 +303,15 @@ fn validate_binary(
                 BinaryEncoding::Base64 => BASE64_STANDARD.decode(value).is_ok_and(|v| {
                     len.is_none_or(|len| usize::try_from(len).ok() == Some(v.len()))
                 }),
+            };
+            if valid {
+                return Ok(());
             }
+            FailureKind::ParseFailure
         }
-        _ => false,
-    }
+        _ => FailureKind::TypeMismatch,
+    };
+    ErrorMarker::err(row_idx, pos, failure, Arc::new(data_type))
 }
 
 fn estimate_data_capacity(tape: &Tape<'_>, pos: &[u32]) -> Result<usize, ArrowError> {

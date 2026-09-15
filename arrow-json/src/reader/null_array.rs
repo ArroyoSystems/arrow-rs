@@ -18,9 +18,10 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, NullArray};
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext};
 
 #[derive(Default)]
@@ -47,7 +48,17 @@ impl ArrayDecoder for NullArrayDecoder {
         Ok(Arc::new(NullArray::new(pos.len())))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        matches!(tape.get(pos), TapeElement::Null)
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => return Ok(()),
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::new(DataType::Null))
     }
 }

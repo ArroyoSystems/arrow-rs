@@ -173,18 +173,35 @@ impl ArrayDecoder for StringViewArrayDecoder {
         Ok(Arc::new(builder.finish()))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::String(_) => true,
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<super::ErrorMarker<'tape>>> {
+        use super::{ErrorMarker, FailureKind};
+        let failure = match tape.get(pos) {
+            TapeElement::String(_) => return Ok(()),
+            TapeElement::Null if self.is_nullable => return Ok(()),
+            TapeElement::Null => FailureKind::NullValue,
             TapeElement::True
             | TapeElement::False
             | TapeElement::Number(_)
             | TapeElement::I64(_)
             | TapeElement::I32(_)
             | TapeElement::F32(_)
-            | TapeElement::F64(_) => self.coerce_primitive,
-            _ => false,
-        }
+            | TapeElement::F64(_)
+                if self.coerce_primitive =>
+            {
+                return Ok(());
+            }
+            _ => FailureKind::TypeMismatch,
+        };
+        ErrorMarker::err(
+            row_idx,
+            pos,
+            failure,
+            Arc::new(arrow_schema::DataType::Utf8View),
+        )
     }
 }

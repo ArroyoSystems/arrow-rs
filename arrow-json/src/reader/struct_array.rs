@@ -23,6 +23,7 @@ use arrow_buffer::NullBufferBuilder;
 use arrow_schema::{ArrowError, DataType, Fields};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext, StructMode};
 
 /// Reusable buffer for tape positions, indexed by (field_idx, row_idx).
@@ -71,7 +72,7 @@ impl FieldTapePositions {
 }
 
 pub struct StructArrayDecoder {
-    data_type: DataType,
+    data_type: Arc<DataType>,
     decoders: Vec<Box<dyn ArrayDecoder>>,
     strict_mode: bool,
     ignore_type_conflicts: bool,
@@ -107,7 +108,7 @@ impl StructArrayDecoder {
         };
 
         Ok(Self {
-            data_type: data_type.clone(),
+            data_type: Arc::new(data_type.clone()),
             decoders,
             strict_mode: ctx.strict_mode(),
             ignore_type_conflicts: ctx.ignore_type_conflicts(),
@@ -266,35 +267,86 @@ impl ArrayDecoder for StructArrayDecoder {
         Ok(Arc::new(array))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
         if self.struct_mode == StructMode::ListOnly {
             let end = match tape.get(pos) {
-                TapeElement::Null => return self.is_nullable,
+                TapeElement::Null if self.is_nullable => return Ok(()),
+                TapeElement::Null => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        self.data_type.clone(),
+                    );
+                }
                 TapeElement::StartList(end) => end,
-                _ => return false,
+                _ => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::TypeMismatch,
+                        self.data_type.clone(),
+                    );
+                }
             };
             let mut child = pos + 1;
-            for (field, decoder) in struct_fields(&self.data_type).iter().zip(&self.decoders) {
-                if child >= end
-                    || (!field.is_nullable() && matches!(tape.get(child), TapeElement::Null))
-                    || !decoder.validate_row(tape, child)
-                {
-                    return false;
+            for field_idx in 0..self.decoders.len() {
+                if child >= end {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::TypeMismatch,
+                        self.data_type.clone(),
+                    );
                 }
+                self.validate_child(tape, child, row_idx, field_idx)?;
                 let Ok(next) = tape.next(child, "struct value") else {
-                    return false;
+                    return ErrorMarker::err(
+                        row_idx,
+                        child,
+                        FailureKind::TypeMismatch,
+                        self.data_type.clone(),
+                    );
                 };
                 child = next;
             }
-            return child == end;
+            return if child == end {
+                Ok(())
+            } else {
+                ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    self.data_type.clone(),
+                )
+            };
         }
-        let end_idx = match (tape.get(pos), self.is_nullable) {
-            (TapeElement::StartObject(end_idx), _) => end_idx,
-            (TapeElement::Null, true) => {
-                return true;
+        let end_idx = match tape.get(pos) {
+            TapeElement::StartObject(end_idx) => end_idx,
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                } else {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             }
             _ => {
-                return false;
+                return ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    Arc::clone(&self.data_type),
+                );
             }
         };
 
@@ -303,49 +355,111 @@ impl ArrayDecoder for StructArrayDecoder {
 
         let mut cur_idx = pos + 1;
         while cur_idx < end_idx {
-            // Read field name
             let field_name = match tape.get(cur_idx) {
                 TapeElement::String(s) => tape.get_string(s),
-                _ => return false,
+                _ => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        cur_idx,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             };
 
-            // Update child pos if match found
             match fields.iter().position(|x| x.name() == field_name) {
                 Some(field_idx) => {
                     let child_pos = cur_idx + 1;
-                    if (!fields[field_idx].is_nullable()
-                        && matches!(tape.get(child_pos), TapeElement::Null))
-                        || !self.decoders[field_idx].validate_row(tape, child_pos)
-                    {
-                        return false;
-                    }
+                    self.validate_child(tape, child_pos, row_idx, field_idx)?;
+
                     validated_fields[field_idx] = true;
                 }
                 None => {
                     if self.strict_mode {
-                        return false;
+                        // Custom field_name - can't use helper
+                        return Err(vec![ErrorMarker {
+                            row_index: row_idx,
+                            tape_pos: Some(cur_idx),
+                            field_name: Some(field_name),
+                            array_indices: Vec::new(),
+                            error_kind: FailureKind::TypeMismatch,
+                            expected_type: Arc::clone(&self.data_type),
+                        }]);
                     }
                 }
             }
 
-            // Advance to next field
             cur_idx = match tape.next(cur_idx + 1, "field value") {
                 Ok(i) => i,
                 Err(_) => {
-                    return false;
+                    return ErrorMarker::err(
+                        row_idx,
+                        cur_idx,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
                 }
+            };
+        }
+
+        // Early exit on happy path - no missing field errors
+        let all_valid = validated_fields
+            .iter()
+            .zip(fields)
+            .all(|(validated, field)| *validated || field.is_nullable());
+
+        if all_valid {
+            return Ok(());
+        }
+
+        // Error path: collect missing field errors
+        let mut missing_errors = Vec::new();
+        for (validated, field) in validated_fields.iter().zip(fields) {
+            if !validated && !field.is_nullable() {
+                missing_errors.push(ErrorMarker {
+                    row_index: row_idx,
+                    tape_pos: None,
+                    field_name: Some(field.name()),
+                    array_indices: Vec::new(),
+                    error_kind: FailureKind::MissingField,
+                    expected_type: Arc::new(field.data_type().clone()),
+                });
             }
         }
 
-        validated_fields
-            .iter()
-            .zip(fields)
-            .all(|(validated, field)| {
-                if !validated && !field.is_nullable() {
-                    return false;
+        Err(missing_errors)
+    }
+}
+
+impl StructArrayDecoder {
+    fn validate_child<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+        field_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let field = &struct_fields(&self.data_type)[field_idx];
+        let result = if !field.is_nullable() && matches!(tape.get(pos), TapeElement::Null) {
+            ErrorMarker::err(
+                row_idx,
+                pos,
+                FailureKind::NullValue,
+                Arc::new(field.data_type().clone()),
+            )
+        } else {
+            self.decoders[field_idx].validate_row(tape, pos, row_idx)
+        };
+        result.map_err(|mut errors| {
+            // Add field name for leaf validator errors that lack field context.
+            for error in &mut errors {
+                // Preserve field names already set by nested validators.
+                if error.field_name.is_none() {
+                    error.field_name = Some(field.name());
                 }
-                true
-            })
+            }
+            errors
+        })
     }
 }
 

@@ -22,12 +22,14 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::PrimitiveBuilder;
 use arrow_array::types::DecimalType;
 use arrow_cast::parse::parse_decimal;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext};
 
 pub struct DecimalArrayDecoder<D: DecimalType> {
+    data_type: Arc<DataType>,
     precision: u8,
     scale: i8,
     ignore_type_conflicts: bool,
@@ -39,6 +41,7 @@ pub struct DecimalArrayDecoder<D: DecimalType> {
 impl<D: DecimalType> DecimalArrayDecoder<D> {
     pub fn new(ctx: &DecoderContext, precision: u8, scale: i8, is_nullable: bool) -> Self {
         Self {
+            data_type: Arc::new(D::TYPE_CONSTRUCTOR(precision, scale)),
             precision,
             scale,
             ignore_type_conflicts: ctx.ignore_type_conflicts(),
@@ -107,39 +110,46 @@ where
         ))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
-        match tape.get(pos) {
-            TapeElement::Null => self.is_nullable,
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let failure = match tape.get(pos) {
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                }
+                FailureKind::NullValue
+            }
             TapeElement::String(idx) => {
                 let s = tape.get_string(idx);
-                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+                if parse_decimal::<D>(s, self.precision, self.scale).is_ok() {
+                    return Ok(());
+                }
+                FailureKind::ParseFailure
             }
             TapeElement::Number(idx) => {
                 let s = tape.get_string(idx);
-                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
-            }
-            TapeElement::I32(v) => {
-                parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
-            }
-            TapeElement::F32(v) => {
-                parse_decimal::<D>(&f32::from_bits(v).to_string(), self.precision, self.scale)
-                    .is_ok()
-            }
-            TapeElement::I64(high) => match tape.get(pos + 1) {
-                TapeElement::I32(low) => {
-                    let v = ((high as i64) << 32) | (low as u32) as i64;
-                    parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
+                if parse_decimal::<D>(s, self.precision, self.scale).is_ok() {
+                    return Ok(());
                 }
-                _ => unreachable!(),
-            },
-            TapeElement::F64(high) => match tape.get(pos + 1) {
-                TapeElement::F32(low) => {
-                    let v = f64::from_bits(((high as u64) << 32) | low as u64);
-                    parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
+                FailureKind::ParseFailure
+            }
+            TapeElement::I32(_)
+            | TapeElement::F32(_)
+            | TapeElement::I64(_)
+            | TapeElement::F64(_) => {
+                let value = super::validation::extract_value(tape, pos).unwrap();
+                if parse_decimal::<D>(&value, self.precision, self.scale).is_ok() {
+                    return Ok(());
                 }
-                _ => unreachable!(),
-            },
-            _ => false,
-        }
+                FailureKind::ParseFailure
+            }
+            _ => FailureKind::TypeMismatch,
+        };
+
+        ErrorMarker::err(row_idx, pos, failure, Arc::clone(&self.data_type))
     }
 }

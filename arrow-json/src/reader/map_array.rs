@@ -23,9 +23,11 @@ use arrow_buffer::{ArrowNativeType, NullBufferBuilder, OffsetBuffer, ScalarBuffe
 use arrow_schema::{ArrowError, DataType, FieldRef, Fields};
 
 use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
 use crate::reader::{ArrayDecoder, DecoderContext};
 
 pub struct MapArrayDecoder {
+    data_type: Arc<DataType>,
     entries_field: FieldRef,
     key_value_fields: Fields,
     ordered: bool,
@@ -66,6 +68,7 @@ impl MapArrayDecoder {
             ctx.make_field_decoder(&key_value_fields[1], key_value_fields[1].is_nullable())?;
 
         Ok(Self {
+            data_type: Arc::new(data_type.clone()),
             entries_field,
             key_value_fields,
             ordered,
@@ -150,33 +153,67 @@ impl ArrayDecoder for MapArrayDecoder {
         Ok(Arc::new(array))
     }
 
-    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
         let end_idx = match tape.get(pos) {
             TapeElement::StartObject(end_idx) => end_idx,
             TapeElement::Null => {
-                return self.is_nullable;
+                if self.is_nullable {
+                    return Ok(());
+                } else {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             }
-            _ => return false,
+            _ => {
+                return ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    Arc::clone(&self.data_type),
+                );
+            }
         };
 
         let mut cur_idx = pos + 1;
         while cur_idx < end_idx {
             let key = cur_idx;
-            let Ok(value) = tape.next(key, "map key") else {
-                return false;
+            let value = match tape.next(key, "map key") {
+                Ok(v) => v,
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        key,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
             };
 
-            if let Ok(i) = tape.next(value, "map value") {
-                cur_idx = i;
-            } else {
-                return false;
-            }
+            cur_idx = match tape.next(value, "map value") {
+                Ok(i) => i,
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        value,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
+            };
 
-            if !(self.keys.validate_row(tape, key) && self.values.validate_row(tape, value)) {
-                return false;
-            }
+            self.keys.validate_row(tape, key, row_idx)?;
+            self.values.validate_row(tape, value, row_idx)?;
         }
 
-        true
+        Ok(())
     }
 }

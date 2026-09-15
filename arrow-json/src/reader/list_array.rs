@@ -51,7 +51,7 @@ impl<O: OffsetSizeTrait, const IS_VIEW: bool> ListLikeArrayDecoder<O, IS_VIEW> {
             (true, DataType::LargeListView(f)) if O::IS_LARGE => f,
             _ => unreachable!(),
         };
-        let decoder = ctx.make_decoder(field.data_type(), field.is_nullable())?;
+        let decoder = ctx.make_field_decoder(field, field.is_nullable())?;
 
         Ok(Self {
             field: field.clone(),
@@ -64,6 +64,25 @@ impl<O: OffsetSizeTrait, const IS_VIEW: bool> ListLikeArrayDecoder<O, IS_VIEW> {
 }
 
 impl<O: OffsetSizeTrait, const IS_VIEW: bool> ArrayDecoder for ListLikeArrayDecoder<O, IS_VIEW> {
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        let end = match tape.get(pos) {
+            TapeElement::StartList(end) => end,
+            TapeElement::Null => return self.is_nullable,
+            _ => return false,
+        };
+        let mut child = pos + 1;
+        while child < end {
+            if !self.decoder.validate_row(tape, child) {
+                return false;
+            }
+            let Ok(next) = tape.next(child, "list value") else {
+                return false;
+            };
+            child = next;
+        }
+        true
+    }
+
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
         let mut child_pos = Vec::with_capacity(pos.len());
         let mut offsets = Vec::with_capacity(pos.len() + 1);
@@ -151,7 +170,7 @@ impl FixedSizeListArrayDecoder {
             DataType::FixedSizeList(f, s) => (f, *s),
             _ => unreachable!(),
         };
-        let decoder = ctx.make_decoder(field.data_type(), field.is_nullable())?;
+        let decoder = ctx.make_field_decoder(field, field.is_nullable())?;
 
         Ok(Self {
             field: field.clone(),
@@ -217,5 +236,32 @@ impl ArrayDecoder for FixedSizeListArrayDecoder {
             pos.len(),
         )?;
         Ok(Arc::new(array))
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        let end_idx = match (tape.get(pos), self.is_nullable) {
+            (TapeElement::StartList(end_idx), _) => end_idx,
+            (TapeElement::Null, true) => {
+                return true;
+            }
+            _ => return false,
+        };
+
+        let mut count = 0;
+        let mut cur_idx = pos + 1;
+        while cur_idx < end_idx {
+            if !self.decoder.validate_row(tape, cur_idx) {
+                return false;
+            }
+            count += 1;
+            // Advance to next field
+            if let Ok(next) = tape.next(cur_idx, "list value") {
+                cur_idx = next;
+            } else {
+                return false;
+            }
+        }
+
+        count == self.size as usize
     }
 }

@@ -31,16 +31,18 @@ pub struct DecimalArrayDecoder<D: DecimalType> {
     precision: u8,
     scale: i8,
     ignore_type_conflicts: bool,
+    is_nullable: bool,
     // Invariant and Send
     phantom: PhantomData<fn(D) -> D>,
 }
 
 impl<D: DecimalType> DecimalArrayDecoder<D> {
-    pub fn new(ctx: &DecoderContext, precision: u8, scale: i8) -> Self {
+    pub fn new(ctx: &DecoderContext, precision: u8, scale: i8, is_nullable: bool) -> Self {
         Self {
             precision,
             scale,
             ignore_type_conflicts: ctx.ignore_type_conflicts(),
+            is_nullable,
             phantom: PhantomData,
         }
     }
@@ -103,5 +105,41 @@ where
                 .finish()
                 .with_precision_and_scale(self.precision, self.scale)?,
         ))
+    }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        match tape.get(pos) {
+            TapeElement::Null => self.is_nullable,
+            TapeElement::String(idx) => {
+                let s = tape.get_string(idx);
+                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+            }
+            TapeElement::Number(idx) => {
+                let s = tape.get_string(idx);
+                parse_decimal::<D>(s, self.precision, self.scale).is_ok()
+            }
+            TapeElement::I32(v) => {
+                parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
+            }
+            TapeElement::F32(v) => {
+                parse_decimal::<D>(&f32::from_bits(v).to_string(), self.precision, self.scale)
+                    .is_ok()
+            }
+            TapeElement::I64(high) => match tape.get(pos + 1) {
+                TapeElement::I32(low) => {
+                    let v = ((high as i64) << 32) | (low as u32) as i64;
+                    parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
+                }
+                _ => unreachable!(),
+            },
+            TapeElement::F64(high) => match tape.get(pos + 1) {
+                TapeElement::F32(low) => {
+                    let v = f64::from_bits(((high as u64) << 32) | low as u64);
+                    parse_decimal::<D>(&v.to_string(), self.precision, self.scale).is_ok()
+                }
+                _ => unreachable!(),
+            },
+            _ => false,
+        }
     }
 }

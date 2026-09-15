@@ -46,4 +46,8 @@ impl ArrayDecoder for NullArrayDecoder {
         }
         Ok(Arc::new(NullArray::new(pos.len())))
     }
+
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        matches!(tape.get(pos), TapeElement::Null)
+    }
 }

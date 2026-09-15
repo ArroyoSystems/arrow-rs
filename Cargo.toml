@@ -116,6 +116,14 @@ object_store = { version = "0.13.2", default-features = false }
 
 simdutf8 = { version = "0.1.5", default-features = false }
 
+[patch.crates-io]
+arrow-array = { path = "./arrow-array" }
+arrow-buffer = { path = "./arrow-buffer" }
+arrow-cast = { path = "./arrow-cast" }
+arrow-ord = { path = "./arrow-ord" }
+arrow-schema = { path = "./arrow-schema" }
+arrow-select = { path = "./arrow-select" }
+
 # release inherited profile keeping debug information and symbols
 # for mem/cpu profiling
 [profile.profiling]

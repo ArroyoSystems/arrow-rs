@@ -46,10 +46,8 @@ impl<R: RunEndIndexType> RunEndEncodedArrayDecoder<R> {
             DataType::RunEndEncoded(_, v) => v,
             _ => unreachable!(),
         };
-        let decoder = ctx.make_decoder(
-            values_field.data_type(),
-            values_field.is_nullable() || is_nullable,
-        )?;
+        let decoder =
+            ctx.make_field_decoder(values_field, values_field.is_nullable() || is_nullable)?;
 
         Ok(Self {
             data_type: data_type.clone(),
@@ -60,6 +58,10 @@ impl<R: RunEndIndexType> RunEndEncodedArrayDecoder<R> {
 }
 
 impl<R: RunEndIndexType + Send> ArrayDecoder for RunEndEncodedArrayDecoder<R> {
+    fn validate_row(&self, tape: &Tape<'_>, pos: u32) -> bool {
+        self.decoder.validate_row(tape, pos)
+    }
+
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayRef, ArrowError> {
         let len = pos.len();
         if len == 0 {

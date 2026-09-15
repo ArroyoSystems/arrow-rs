@@ -490,6 +490,24 @@ impl<W: Write + Send> ArrowWriter<W> {
         self.writer.finish()
     }
 
+    /// Flushes buffered rows and writes a checkpoint suffix to `target`.
+    ///
+    /// Appending the returned bytes to the live output as it exists immediately
+    /// after this call produces a complete Parquet file. The live output does not
+    /// receive the suffix and remains open for more rows or checkpoints.
+    ///
+    /// `target` must be empty and independent of the live output. Metadata offsets
+    /// are relative to the complete file, not the suffix. On error, discard the
+    /// target; the live writer's metadata is retained. An error flushing the live
+    /// output itself has the same semantics as [`Self::flush`].
+    ///
+    /// Checkpointing temporarily clones row-group metadata, page indexes and any
+    /// pending bloom filters. The returned metadata uses Arrow 58.4's native type.
+    pub fn get_trailing_bytes(&mut self, target: W) -> Result<(W, ParquetMetaData)> {
+        self.flush()?;
+        self.writer.write_trailing_bytes(target)
+    }
+
     /// Close and finalize the underlying Parquet writer
     pub fn close(mut self) -> Result<ParquetMetaData> {
         self.finish()

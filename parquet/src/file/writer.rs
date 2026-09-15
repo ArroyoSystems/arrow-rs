@@ -450,6 +450,35 @@ impl<W: Write + Send> SerializedFileWriter<W> {
         self.buf.bytes_written()
     }
 
+    /// Writes a checkpoint suffix without consuming the live writer's metadata.
+    pub(crate) fn write_trailing_bytes(&mut self, target: W) -> Result<(W, ParquetMetaData)> {
+        self.assert_previous_writer_closed()?;
+        self.buf.flush()?;
+
+        // Metadata offsets refer to the complete file, not the separate suffix.
+        let mut buf = TrackedWrite::new(target);
+        buf.bytes_written = self.buf.bytes_written();
+        let mut snapshot = Self {
+            buf,
+            descr: self.descr.clone(),
+            props: self.props.clone(),
+            row_groups: self.row_groups.clone(),
+            bloom_filters: self.bloom_filters.clone(),
+            column_indexes: self.column_indexes.clone(),
+            offset_indexes: self.offset_indexes.clone(),
+            row_group_index: self.row_group_index,
+            kv_metadatas: self.kv_metadatas.clone(),
+            finished: false,
+            #[cfg(feature = "encryption")]
+            file_encryptor: self.file_encryptor.clone(),
+        };
+
+        // Finishing consumes only the snapshot. Even an output error cannot replace
+        // the live writer or drain its row groups, bloom filters, or page indexes.
+        let metadata = snapshot.finish()?;
+        Ok((snapshot.buf.into_inner()?, metadata))
+    }
+
     /// Get the file encryptor used by this instance to encrypt data
     #[cfg(feature = "encryption")]
     pub(crate) fn file_encryptor(&self) -> Option<Arc<FileEncryptor>> {
